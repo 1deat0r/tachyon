@@ -81,26 +81,13 @@ pub fn resolve_scope(
     requested: &Path,
 ) -> Result<(PathBuf, String), ToolError> {
     let depth_check = || -> Result<(), ToolError> {
-        let joined = if requested.is_absolute() {
-            requested.to_path_buf()
+        if tachyon_policy::lexical_contained(workspace_root, requested) {
+            Ok(())
         } else {
-            workspace_root.join(requested)
-        };
-        let mut depth: i32 = 0;
-        for component in joined.components() {
-            match component {
-                std::path::Component::ParentDir => depth -= 1,
-                std::path::Component::Normal(_) => depth += 1,
-                std::path::Component::RootDir | std::path::Component::Prefix(_) => depth = 0,
-                std::path::Component::CurDir => {}
-            }
-            if depth < 0 {
-                return Err(ToolError::Containment(
-                    tachyon_policy::ContainmentError::Traversal(requested.display().to_string()),
-                ));
-            }
+            Err(ToolError::Containment(
+                tachyon_policy::ContainmentError::Traversal(requested.display().to_string()),
+            ))
         }
-        Ok(())
     };
     depth_check()?;
     match contain(workspace_root, requested) {

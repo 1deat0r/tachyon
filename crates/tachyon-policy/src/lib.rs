@@ -342,6 +342,54 @@ pub enum ContainmentError {
     MissingComponent(String),
 }
 
+/// Lexical check: resolving `requested` against `workspace_root` must never
+/// climb above the workspace root. Platform-independent and disk-free: the
+/// floor is the root's own depth, not zero, so deep temp dirs on Windows
+/// and macOS runners are handled exactly like `/tmp`.
+#[must_use]
+pub fn lexical_contained(workspace_root: &Path, requested: &Path) -> bool {
+    if requested.is_absolute() {
+        let mut depth: i32 = 0;
+        for component in requested.components() {
+            match component {
+                Component::ParentDir => depth -= 1,
+                Component::Normal(_) => depth += 1,
+                Component::RootDir | Component::Prefix(_) => depth = 0,
+                Component::CurDir => {}
+            }
+            if depth < 0 {
+                return false;
+            }
+        }
+        // Merely absolute is not traversal; the canonical check decides
+        // inside vs outside roots.
+        return true;
+    }
+    let mut depth: i32 = 0;
+    for component in workspace_root.components() {
+        match component {
+            Component::ParentDir => depth -= 1,
+            Component::Normal(_) => depth += 1,
+            Component::RootDir | Component::Prefix(_) | Component::CurDir => {}
+        }
+    }
+    let floor = depth;
+    for component in requested.components() {
+        match component {
+            Component::ParentDir => depth -= 1,
+            Component::Normal(_) => depth += 1,
+            // An absolute smuggled into a relative join, or a drive-qualified
+            // fragment: refuse lexically rather than reason about it.
+            Component::RootDir | Component::Prefix(_) => return false,
+            Component::CurDir => {}
+        }
+        if depth < floor {
+            return false;
+        }
+    }
+    true
+}
+
 /// Resolves `requested` (workspace-relative or absolute) against
 /// `workspace_root`, rejecting traversal and symlink escapes, and verifies
 /// the result sits inside `workspace_root`. Returns the resolved path.
@@ -355,18 +403,9 @@ pub fn contain(workspace_root: &Path, requested: &Path) -> Result<PathBuf, Conta
     } else {
         workspace_root.join(requested)
     };
-    // Lexical pass: reject `..` above the join base before touching disk.
-    let mut depth: i32 = 0;
-    for component in joined.components() {
-        match component {
-            Component::ParentDir => depth -= 1,
-            Component::Normal(_) => depth += 1,
-            Component::RootDir | Component::Prefix(_) => depth = 0,
-            Component::CurDir => {}
-        }
-        if depth < 0 {
-            return Err(ContainmentError::Traversal(requested.display().to_string()));
-        }
+    // Lexical pass: reject `..` above the workspace floor before touching disk.
+    if !lexical_contained(workspace_root, requested) {
+        return Err(ContainmentError::Traversal(requested.display().to_string()));
     }
     // Canonicalize the longest existing prefix to resolve symlinks.
     let mut existing = joined.clone();
@@ -502,6 +541,24 @@ mod tests {
             contain(&root, Path::new("../../etc/passwd")),
             Err(ContainmentError::Traversal(_))
         ));
+    }
+
+    #[test]
+    fn traversal_rejected_under_deep_root() {
+        // Simulates deep temp dirs (Windows/macOS runners): `..` chains that
+        // stay non-negative from the filesystem root must still be rejected
+        // when they climb above the workspace floor.
+        let base = std::env::temp_dir().join(format!("tachyon-deep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("a").join("b").join("workspace");
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(!lexical_contained(&root, Path::new("../../outside")));
+        assert!(matches!(
+            contain(&root, Path::new("../../outside")),
+            Err(ContainmentError::Traversal(_))
+        ));
+        assert!(lexical_contained(&root, Path::new("sub/../inside")));
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[cfg(unix)]
