@@ -1,0 +1,67 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/tachyon-types",
+    "crates/tachyon-protocol",
+    "crates/tachyon-ir",
+    "crates/tachyon-store",
+    "crates/tachyon-policy",
+    "crates/tachyon-tools",
+    "crates/tachyon-repo",
+    "crates/tachyon-retrieval",
+    "crates/tachyon-models",
+    "crates/tachyon-judgment",
+    "crates/tachyon-router",
+    "crates/tachyon-scheduler",
+    "crates/tachyon-verify",
+    "crates/tachyon-telemetry",
+    "crates/tachyon-core",
+    "crates/tachyon-gateway",
+    "crates/tachyon-tui",
+    "crates/tachyon-app",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.98.1"
+authors = ["Tachyon contributors"]
+
+[workspace.dependencies]
+anyhow = "1"
+async-trait = "0.1"
+axum = { version = "0.8.9", features = ["ws"] }
+blake3 = "1"
+bytes = "1"
+clap = { version = "4.6.7", features = ["derive", "env"] }
+crossterm = "0.29"
+dashmap = "6"
+futures = "0.3"
+notify = "8"
+parking_lot = "0.12"
+proptest = "1"
+ratatui = "0.30.2"
+schemars = { version = "1", features = ["uuid1"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+smallvec = "1"
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
+thiserror = "2"
+tokio = { version = "1.53.1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tower = "0.5"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+uuid = { version = "1", features = ["v7", "serde"] }
+walkdir = "2"
+zstd = "0.13"
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+
+[workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
