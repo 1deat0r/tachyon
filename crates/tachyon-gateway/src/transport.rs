@@ -49,11 +49,16 @@ pub struct Listener {
     inner: UnixListener,
     #[cfg(windows)]
     pipe_name: PathBuf,
+    /// Next pipe instance, created eagerly so clients can always connect.
+    #[cfg(windows)]
+    pending: std::sync::Mutex<Option<NamedPipeServer>>,
 }
 
 impl Listener {
     /// Binds the local endpoint for `socket_path` (`data_dir/gateway.sock`
     /// on Unix; the parent data dir selects the pipe name on Windows).
+    /// The first pipe instance is created here so connects never race
+    /// the accept loop.
     pub fn bind(socket_path: &Path) -> io::Result<Self> {
         #[cfg(unix)]
         {
@@ -64,8 +69,13 @@ impl Listener {
         #[cfg(windows)]
         {
             let dir = socket_path.parent().unwrap_or(socket_path);
+            let pipe_name = pipe_name_for(dir);
+            let first = ServerOptions::new()
+                .first_pipe_instance(true)
+                .create(&pipe_name)?;
             Ok(Self {
-                pipe_name: pipe_name_for(dir),
+                pipe_name,
+                pending: std::sync::Mutex::new(Some(first)),
             })
         }
     }
@@ -100,7 +110,20 @@ impl Listener {
         }
         #[cfg(windows)]
         {
-            let server = ServerOptions::new().create(&self.pipe_name)?;
+            // Hand off the waiting instance and immediately stage its
+            // replacement, so a listener always exists for the next client.
+            let server = {
+                let mut pending = self
+                    .pending
+                    .lock()
+                    .map_err(|_| io::Error::other("pipe handoff lock poisoned"))?;
+                let server = match pending.take() {
+                    Some(server) => server,
+                    None => ServerOptions::new().create(&self.pipe_name)?,
+                };
+                *pending = Some(ServerOptions::new().create(&self.pipe_name)?);
+                server
+            };
             server.connect().await?;
             Ok(Stream {
                 inner: StreamKind::Server(server),
