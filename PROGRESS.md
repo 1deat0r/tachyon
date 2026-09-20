@@ -17,8 +17,11 @@ Milestone 2 — Execution IR + scheduler (Milestone 1 complete, see gates below)
   CLI client (`gateway`, `session create`, `task create/list/get/send/
   pause/resume/cancel`). Gate: `fmt --check`, `check`, `test` (21 passed,
   0 failed incl. gateway restart-recovery test), `clippy -D warnings`,
-  plus live `kill -9` gate: task recovered at rev 1 with same
-  objective/status and continued to rev 2.
+  plus live `kill -9` gate against the gateway binary (verified dead,
+  stale endpoint evicted on restart): task recovered at rev 1 with same
+  objective/status and continued to rev 2. (First attempt mistakenly
+  killed the wrapper shell, leaving the gateway alive and the restart
+  correctly refused with AlreadyRunning; redone against the binary.)
 
 - 2026-09-20 Milestone 0 — Foundation: `tachyon-types` (UUIDv7 ids,
   RFC 3339 timestamps), `tachyon-protocol` skeleton (versioned
