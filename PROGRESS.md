@@ -4,9 +4,23 @@ This file is updated by the implementing agent after every milestone.
 
 ## Current milestone
 
-Milestone 2 — Execution IR + scheduler (Milestone 1 complete, see gates below)
+Milestone 3 — Capability model + policy (Milestone 2 complete, see gates below)
 
 ## Completed gates
+
+- 2026-09-21 Milestone 2 — Execution IR + scheduler: `tachyon-ir`
+  (validated DAG: identity/invocation/dataflow/bindings/purity/effects,
+  conditional deps, cardinality, resource-key grammar + segment-based
+  overlap, critical-path estimates), `tachyon-scheduler` (loop owns
+  readiness, atomic conflict/resource grants, CP-priority scoring,
+  retries/backoff, timeouts, structured cancellation, duration EWMA;
+  `FakeExecutor` + `Tracker` for order/violation assertions). Gate:
+  `fmt --check`, `check`, `test` (all suites green incl. 8 scheduler
+  tests + 24-case proptest of conflict-freedom and dependency order),
+  `clippy -D warnings`. Two real bugs found by testing and fixed:
+  `JoinSet::join_next` on an empty set never pends (busy-spun the loop
+  and starved commands — now guarded by `is_empty`); proptest spawned
+  the loop outside a runtime (moved inside `block_on`).
 
 - 2026-09-20 Milestone 1 — Durable task kernel: SQLite `state.db`
   (WAL/FULL/FKs/busy-timeout, single-writer `StoreWriter`, migrations),

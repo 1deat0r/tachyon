@@ -245,7 +245,7 @@ struct TaskRun {
     finished: bool,
 }
 
-/// Completion delivered by the JoinSet.
+/// Completion delivered by the `JoinSet`.
 struct Completion {
     task_id: TaskId,
     node_id: NodeId,
@@ -278,19 +278,21 @@ async fn run_loop(
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
+        // `JoinSet::join_next` on an empty set resolves immediately, which
+        // would busy-spin the loop and starve command handling: only poll
+        // it while something runs.
+        let joining = !running.is_empty();
         tokio::select! {
             biased;
             command = rx.recv() => {
                 match command {
-                    Some(command) => app.handle(command).await,
+                    Some(command) => app.handle(command),
                     None => break,
                 }
             }
-            completed = running.join_next() => {
-                match completed {
-                    Some(Ok(completion)) => app.complete(completion),
-                    Some(Err(_)) => {}
-                    None => {}
+            completed = async { running.join_next().await }, if joining => {
+                if let Some(Ok(completion)) = completed {
+                    app.complete(completion);
                 }
             }
             _ = tick.tick() => {}
@@ -301,7 +303,7 @@ async fn run_loop(
 }
 
 impl Loop {
-    async fn handle(&mut self, command: SchedulerCommand) {
+    fn handle(&mut self, command: SchedulerCommand) {
         match command {
             SchedulerCommand::Submit {
                 task_id,
@@ -312,7 +314,7 @@ impl Loop {
                 let _ = reply.send(outcome);
             }
             SchedulerCommand::CancelTask { task_id, reply } => {
-                let outcome = self.cancel_task(task_id).await;
+                let outcome = self.cancel_task(task_id);
                 let _ = reply.send(outcome);
             }
             SchedulerCommand::Status { task_id, reply } => {
@@ -362,7 +364,7 @@ impl Loop {
         Ok(())
     }
 
-    async fn cancel_task(&mut self, task_id: TaskId) -> Result<(), SchedulerError> {
+    fn cancel_task(&mut self, task_id: TaskId) -> Result<(), SchedulerError> {
         // Collect the stop plan first so no run borrow crosses the awaits
         // and abort calls below.
         let plans: Vec<(NodeId, tachyon_ir::CancellationPolicy, Option<AbortHandle>)> = {
@@ -475,7 +477,7 @@ impl Loop {
                 if let Some(run) = self.tasks.get_mut(&task_id) {
                     if let Some(node) = run.nodes.get_mut(&node_id) {
                         node.status = NodeStatus::Succeeded;
-                        node.outputs = outputs.clone();
+                        node.outputs.clone_from(&outputs);
                     }
                     run.outputs.insert(node_id, outputs);
                 }
@@ -495,27 +497,27 @@ impl Loop {
                     )
                 });
                 if made < budget {
-                    if let Some(run) = self.tasks.get_mut(&task_id) {
-                        if let Some(node) = run.nodes.get_mut(&node_id) {
-                            node.status = NodeStatus::Pending;
-                            if backoff > 0 {
-                                node.blocked_until =
-                                    Some(Instant::now() + Duration::from_millis(backoff));
-                            }
+                    if let Some(run) = self.tasks.get_mut(&task_id)
+                        && let Some(node) = run.nodes.get_mut(&node_id)
+                    {
+                        node.status = NodeStatus::Pending;
+                        if backoff > 0 {
+                            node.blocked_until =
+                                Some(Instant::now() + Duration::from_millis(backoff));
                         }
                     }
                     tracing::debug!(node = ?node_id, error, "node failed; retrying");
-                } else if let Some(run) = self.tasks.get_mut(&task_id) {
-                    if let Some(node) = run.nodes.get_mut(&node_id) {
-                        node.status = NodeStatus::Failed;
-                    }
+                } else if let Some(run) = self.tasks.get_mut(&task_id)
+                    && let Some(node) = run.nodes.get_mut(&node_id)
+                {
+                    node.status = NodeStatus::Failed;
                 }
             }
             OutcomeStatus::Cancelled => {
-                if let Some(run) = self.tasks.get_mut(&task_id) {
-                    if let Some(node) = run.nodes.get_mut(&node_id) {
-                        node.status = NodeStatus::Cancelled;
-                    }
+                if let Some(run) = self.tasks.get_mut(&task_id)
+                    && let Some(node) = run.nodes.get_mut(&node_id)
+                {
+                    node.status = NodeStatus::Cancelled;
                 }
             }
         }
@@ -552,15 +554,14 @@ impl Loop {
         status: NodeStatus,
         outputs: Option<serde_json::Map<String, serde_json::Value>>,
     ) {
-        if let Some(run) = self.tasks.get_mut(&task_id) {
-            if let Some(node) = run.nodes.get_mut(&node_id) {
-                if !node.status.is_terminal() {
-                    node.status = status;
-                    if let Some(outputs) = outputs {
-                        node.outputs = outputs.clone();
-                        run.outputs.insert(node_id, outputs);
-                    }
-                }
+        if let Some(run) = self.tasks.get_mut(&task_id)
+            && let Some(node) = run.nodes.get_mut(&node_id)
+            && !node.status.is_terminal()
+        {
+            node.status = status;
+            if let Some(outputs) = outputs {
+                node.outputs.clone_from(&outputs);
+                run.outputs.insert(node_id, outputs);
             }
         }
         self.release_grant(task_id, node_id);
@@ -589,17 +590,12 @@ impl Loop {
         let mut best: f64 = 0.0;
         for edge in &run.graph.dependencies {
             if edge.from == node_id {
-                let child_estimate = run
-                    .graph
-                    .nodes
-                    .get(&edge.to)
-                    .map(|child| {
-                        self.estimates
-                            .get(&child.invocation.capability.0)
-                            .copied()
-                            .unwrap_or(DEFAULT_ESTIMATE_MS)
-                    })
-                    .unwrap_or(0.0);
+                let child_estimate = run.graph.nodes.get(&edge.to).map_or(0.0, |child| {
+                    self.estimates
+                        .get(&child.invocation.capability.0)
+                        .copied()
+                        .unwrap_or(DEFAULT_ESTIMATE_MS)
+                });
                 best = best.max(child_estimate + self.critical_path(run, edge.to, memo));
             }
         }
@@ -636,9 +632,8 @@ impl Loop {
                     now.duration_since(ready).as_secs_f64() * AGE_BONUS_PER_SEC
                 });
                 let penalty = match def.speculation {
-                    SpeculationPolicy::Forbidden => 0.0,
+                    SpeculationPolicy::Forbidden | SpeculationPolicy::Preferred => 0.0,
                     SpeculationPolicy::Allowed => SPECULATION_PENALTY,
-                    SpeculationPolicy::Preferred => 0.0,
                 };
                 let score =
                     self.critical_path(run, *node_id, &mut memo) + def.priority.score() + age
@@ -686,22 +681,22 @@ impl Loop {
             match decision {
                 PendingDecision::Wait => {}
                 PendingDecision::Ready => {
-                    if let Some(run) = self.tasks.get_mut(&task_id) {
-                        if let Some(node) = run.nodes.get_mut(&node_id) {
-                            node.status = NodeStatus::Ready;
-                            if node.ready_at.is_none() {
-                                node.ready_at = Some(now);
-                            }
-                            changed = true;
+                    if let Some(run) = self.tasks.get_mut(&task_id)
+                        && let Some(node) = run.nodes.get_mut(&node_id)
+                    {
+                        node.status = NodeStatus::Ready;
+                        if node.ready_at.is_none() {
+                            node.ready_at = Some(now);
                         }
+                        changed = true;
                     }
                 }
                 PendingDecision::Skip => {
-                    if let Some(run) = self.tasks.get_mut(&task_id) {
-                        if let Some(node) = run.nodes.get_mut(&node_id) {
-                            node.status = NodeStatus::Skipped;
-                            changed = true;
-                        }
+                    if let Some(run) = self.tasks.get_mut(&task_id)
+                        && let Some(node) = run.nodes.get_mut(&node_id)
+                    {
+                        node.status = NodeStatus::Skipped;
+                        changed = true;
                     }
                     self.update_finished(task_id);
                 }
@@ -717,10 +712,10 @@ impl Loop {
         let Some(node) = run.nodes.get(&node_id) else {
             return PendingDecision::Wait;
         };
-        if let Some(until) = node.blocked_until {
-            if now < until {
-                return PendingDecision::Wait;
-            }
+        if let Some(until) = node.blocked_until
+            && now < until
+        {
+            return PendingDecision::Wait;
         }
         for edge in run
             .graph
@@ -926,14 +921,13 @@ async fn with_timeout(
 #[cfg(test)]
 pub mod test_support {
     use super::{Budgets, ExecutorRegistry, SchedulerHandle, spawn};
-    use crate::executor::{Executor, FakeExecutor};
+    use crate::executor::FakeExecutor;
     use std::collections::HashMap;
     use std::sync::Arc;
     use std::time::Duration;
     use tachyon_ir::{
         AccessSet, CancellationPolicy, EffectClass, ExecutionGraph, ExecutionNode, ExecutorKind,
-        Idempotency, Invocation, NodePriority, ResourceClaim, RetryPolicy, SpeculationPolicy,
-        TimeoutPolicy,
+        Invocation, NodePriority, ResourceClaim, RetryPolicy, SpeculationPolicy, TimeoutPolicy,
     };
     use tachyon_types::{CapabilityId, NodeId, TaskId};
 
@@ -971,6 +965,7 @@ pub mod test_support {
     }
 
     /// Spawns a scheduler with one fake executor of each requested kind.
+    #[must_use]
     pub fn spawn_with_fake(
         kinds: &[ExecutorKind],
         latency: Duration,
@@ -1005,7 +1000,7 @@ pub mod test_support {
     /// Builds a graph from nodes and `(from_index, to_index)` edges.
     #[must_use]
     pub fn assemble(
-        task: TaskId,
+        _task: TaskId,
         nodes: Vec<ExecutionNode>,
         edges: &[(usize, usize)],
         condition: tachyon_ir::DependencyCondition,
@@ -1251,27 +1246,32 @@ mod tests {
                 }
                 let graph = assemble(task, nodes.clone(), &edges, DependencyCondition::OnSuccess);
                 prop_assert_eq!(graph.validate(task), Ok(()));
-                let (handle, fakes, _join) =
-                    spawn_with_fake(&[ExecutorKind::Native], Duration::from_millis(5));
-                let tracker = fakes[0].tracker();
-                let snapshot = block_on(async {
+                // Spawn inside the runtime: `tokio::spawn` needs a reactor.
+                let (snapshot, violations, start_order, finish_order) = block_on(async {
+                    let (handle, fakes, _join) =
+                        spawn_with_fake(&[ExecutorKind::Native], Duration::from_millis(5));
+                    let tracker = fakes[0].tracker();
                     handle.submit(task, graph).await.unwrap();
-                    handle
+                    let snapshot = handle
                         .wait_finished(task, Duration::from_secs(20))
                         .await
-                        .unwrap()
+                        .unwrap();
+                    (
+                        snapshot,
+                        tracker.violations(),
+                        tracker.start_order(),
+                        tracker.finish_order(),
+                    )
                 });
                 prop_assert!(snapshot.finished);
-                prop_assert!(tracker.violations().is_empty());
+                prop_assert!(violations.is_empty());
                 // Dependency order: every edge's parent finished before the child started.
-                let starts: HashMap<_, _> = tracker
-                    .start_order()
+                let starts: HashMap<_, _> = start_order
                     .into_iter()
                     .enumerate()
                     .map(|(index, id)| (id, index))
                     .collect();
-                let finishes: HashMap<_, _> = tracker
-                    .finish_order()
+                let finishes: HashMap<_, _> = finish_order
                     .into_iter()
                     .enumerate()
                     .map(|(index, id)| (id, index))

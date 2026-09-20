@@ -256,19 +256,15 @@ impl Executor for FakeExecutor {
             biased;
             () = cancel.cancelled() => NodeOutcome::cancelled(started.elapsed()),
             () = tokio::time::sleep(self.latency) => {
-                let fail = self
-                    .fail_remaining
-                    .lock()
-                    .map(|mut fails| {
-                        let remaining = fails.get(&node.id).copied().unwrap_or(0);
-                        if remaining > 0 {
-                            fails.insert(node.id, remaining.saturating_sub(1));
-                            true
-                        } else {
-                            false
-                        }
-                    })
-                    .unwrap_or(false);
+                let fail = self.fail_remaining.lock().is_ok_and(|mut fails| {
+                    let remaining = fails.get(&node.id).copied().unwrap_or(0);
+                    if remaining > 0 {
+                        fails.insert(node.id, remaining.saturating_sub(1));
+                        true
+                    } else {
+                        false
+                    }
+                });
                 drop(guard);
                 if fail {
                     NodeOutcome::failed("scripted fake failure".to_owned(), started.elapsed())
