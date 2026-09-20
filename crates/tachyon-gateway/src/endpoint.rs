@@ -13,6 +13,8 @@ use tachyon_protocol::PROTOCOL_VERSION;
 use tachyon_types::Timestamp;
 use thiserror::Error;
 
+use crate::transport::connect;
+
 /// Errors from endpoint claim/setup.
 #[derive(Debug, Error)]
 pub enum EndpointError {
@@ -71,12 +73,12 @@ pub async fn claim_runtime_dir(data_dir: &Path) -> Result<ClaimPaths, EndpointEr
     };
     if paths.endpoint_file.exists() {
         let info = read_endpoint(&paths.endpoint_file)?;
-        if probe_socket(&paths.socket).await {
+        if probe_socket(&live_address(&paths)).await {
             return Err(EndpointError::AlreadyRunning { pid: info.pid });
         }
         let _ = std::fs::remove_file(&paths.socket);
         let _ = std::fs::remove_file(&paths.endpoint_file);
-    } else if paths.socket.exists() && !probe_socket(&paths.socket).await {
+    } else if paths.socket.exists() && !probe_socket(&live_address(&paths)).await {
         // Socket file without endpoint metadata: leftover of a crash.
         let _ = std::fs::remove_file(&paths.socket);
     } else if paths.socket.exists() {
@@ -85,10 +87,24 @@ pub async fn claim_runtime_dir(data_dir: &Path) -> Result<ClaimPaths, EndpointEr
     Ok(paths)
 }
 
-/// Writes fresh endpoint metadata after a successful bind.
-pub fn write_endpoint(paths: &ClaimPaths) -> Result<EndpointInfo, EndpointError> {
+/// Address a live owner listens on: the socket file on Unix, the derived
+/// pipe name on Windows.
+fn live_address(paths: &ClaimPaths) -> PathBuf {
+    #[cfg(unix)]
+    {
+        paths.socket.clone()
+    }
+    #[cfg(windows)]
+    {
+        crate::transport::pipe_name_for(&paths.dir)
+    }
+}
+
+/// Writes endpoint metadata for the bound `address` (socket path on Unix,
+/// pipe name on Windows) after a successful bind.
+pub fn write_endpoint(paths: &ClaimPaths, address: &Path) -> Result<EndpointInfo, EndpointError> {
     let info = EndpointInfo {
-        socket_path: paths.socket.clone(),
+        socket_path: address.to_owned(),
         pid: std::process::id(),
         started_at_micros: Timestamp::now().as_micros(),
         protocol_version: PROTOCOL_VERSION,
@@ -114,12 +130,14 @@ fn read_endpoint(path: &Path) -> Result<EndpointInfo, EndpointError> {
     serde_json::from_slice(&bytes).map_err(EndpointError::from)
 }
 
-/// True when something accepts connections on `socket`.
-async fn probe_socket(socket: &Path) -> bool {
-    tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        tokio::net::UnixStream::connect(socket),
-    )
-    .await
-    .is_ok_and(|result| result.is_ok())
+/// Reads endpoint metadata written by a running gateway.
+pub fn read_endpoint_info(path: &Path) -> Result<EndpointInfo, EndpointError> {
+    read_endpoint(path)
+}
+
+/// True when something accepts connections on `address` (socket or pipe).
+async fn probe_socket(address: &Path) -> bool {
+    tokio::time::timeout(std::time::Duration::from_secs(2), connect(address))
+        .await
+        .is_ok_and(|result| result.is_ok())
 }

@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::Value;
 use tachyon_gateway::start;
+use tachyon_gateway::transport::connect;
 use tachyon_protocol::{Command, CommandResult, RequestEnvelope, ResponseEnvelope};
 use tachyon_types::EventId;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -22,7 +23,7 @@ fn test_dir() -> PathBuf {
 }
 
 async fn call(socket: &Path, command: Command) -> Value {
-    let mut stream = tokio::net::UnixStream::connect(socket).await.unwrap();
+    let mut stream = connect(socket).await.unwrap();
     let request = RequestEnvelope {
         protocol_version: tachyon_protocol::PROTOCOL_VERSION,
         request_id: EventId::generate(),

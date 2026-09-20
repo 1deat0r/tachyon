@@ -9,6 +9,7 @@
 
 mod endpoint;
 mod server;
+pub mod transport;
 
-pub use endpoint::{ClaimPaths, EndpointInfo, claim_runtime_dir};
+pub use endpoint::{ClaimPaths, EndpointInfo, claim_runtime_dir, read_endpoint_info};
 pub use server::{GatewayError, RunningGateway, start};

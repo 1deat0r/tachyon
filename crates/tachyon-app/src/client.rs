@@ -6,6 +6,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
+use tachyon_gateway::transport::connect;
 use tachyon_protocol::{
     Command, CommandResult, RequestEnvelope, ResponseEnvelope, check_version, decode_frame,
     encode_frame,
@@ -13,11 +14,12 @@ use tachyon_protocol::{
 use tachyon_types::EventId;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
-/// Sends `command` to the gateway at `socket_path` and returns the result.
-pub async fn send(socket_path: &Path, command: Command) -> Result<CommandResult> {
-    let mut stream = tokio::net::UnixStream::connect(socket_path)
+/// Sends `command` to the gateway at `address` (socket path or pipe name)
+/// and returns the result.
+pub async fn send(address: &Path, command: Command) -> Result<CommandResult> {
+    let mut stream = connect(address)
         .await
-        .with_context(|| format!("connecting to gateway at {}", socket_path.display()))?;
+        .with_context(|| format!("connecting to gateway at {}", address.display()))?;
     let request = RequestEnvelope {
         protocol_version: tachyon_protocol::PROTOCOL_VERSION,
         request_id: EventId::generate(),

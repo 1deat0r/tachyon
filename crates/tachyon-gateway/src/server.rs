@@ -19,7 +19,6 @@ use tachyon_store::StoreWriter;
 use tachyon_types::{ApprovalId, SessionId, TaskId, WorkspaceId};
 use thiserror::Error;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -27,6 +26,7 @@ use uuid::Uuid;
 use crate::endpoint::{
     ClaimPaths, EndpointError, claim_runtime_dir, release_runtime_dir, write_endpoint,
 };
+use crate::transport::{Listener, Stream};
 
 /// Errors produced by the gateway.
 #[derive(Debug, Error)]
@@ -95,8 +95,8 @@ pub async fn start(data_dir: &Path) -> Result<RunningGateway, GatewayError> {
         EndpointError::AlreadyRunning { pid } => GatewayError::AlreadyRunning { pid },
         other => GatewayError::Endpoint(other),
     })?;
-    let listener = UnixListener::bind(&paths.socket)?;
-    write_endpoint(&paths)?;
+    let listener = Listener::bind(&paths.socket)?;
+    write_endpoint(&paths, &listener.local_address())?;
     let store = Arc::new(StoreWriter::open(data_dir).await?);
     let state = Arc::new(GatewayState {
         store,
@@ -127,17 +127,13 @@ async fn recover_incomplete(state: &Arc<GatewayState>) -> Result<(), GatewayErro
     Ok(())
 }
 
-async fn accept_loop(
-    listener: UnixListener,
-    state: Arc<GatewayState>,
-    shutdown: CancellationToken,
-) {
+async fn accept_loop(listener: Listener, state: Arc<GatewayState>, shutdown: CancellationToken) {
     loop {
         tokio::select! {
             () = shutdown.cancelled() => break,
             accepted = listener.accept() => {
                 match accepted {
-                    Ok((stream, _)) => {
+                    Ok(stream) => {
                         tokio::spawn(serve_connection(stream, state.clone(), shutdown.clone()));
                     }
                     Err(_) => {
@@ -152,7 +148,7 @@ async fn accept_loop(
 }
 
 async fn serve_connection(
-    mut stream: UnixStream,
+    mut stream: Stream,
     state: Arc<GatewayState>,
     shutdown: CancellationToken,
 ) {
@@ -180,7 +176,7 @@ enum ReadError {
 }
 
 async fn read_request(
-    stream: &mut UnixStream,
+    stream: &mut Stream,
 ) -> Result<Result<RequestEnvelope, ResponseEnvelope>, ReadError> {
     let mut prefix = [0_u8; tachyon_protocol::FRAME_PREFIX_LEN];
     if let Err(err) = stream.read_exact(&mut prefix).await {
@@ -220,10 +216,7 @@ async fn read_request(
     }
 }
 
-async fn write_response(
-    stream: &mut UnixStream,
-    response: &ResponseEnvelope,
-) -> std::io::Result<()> {
+async fn write_response(stream: &mut Stream, response: &ResponseEnvelope) -> std::io::Result<()> {
     match encode_frame(response) {
         Ok(bytes) => stream.write_all(&bytes).await,
         Err(_) => Err(std::io::Error::other("response too large")),

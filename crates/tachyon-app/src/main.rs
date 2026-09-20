@@ -198,8 +198,10 @@ fn runtime() -> Result<tokio::runtime::Runtime> {
         .context("starting async runtime")
 }
 
-fn socket_path(config: &Config) -> PathBuf {
-    config.data_dir.join("gateway.sock")
+fn socket_path(config: &Config) -> Result<PathBuf> {
+    let info = tachyon_gateway::read_endpoint_info(&config.data_dir.join("gateway.json"))
+        .context("reading gateway endpoint (is the gateway running?)")?;
+    Ok(info.socket_path)
 }
 
 fn run_gateway(config: &Config) -> Result<bool> {
@@ -218,16 +220,18 @@ fn run_gateway(config: &Config) -> Result<bool> {
 }
 
 fn run_session(config: &Config, json: bool) -> Result<bool> {
+    let address = socket_path(config)?;
     runtime()?.block_on(async {
-        let result = send(&socket_path(config), Command::CreateSession).await?;
+        let result = send(&address, Command::CreateSession).await?;
         render(&result, json)
     })
 }
 
 fn run_task(config: &Config, action: TaskAction, json: bool) -> Result<bool> {
+    let address = socket_path(config)?;
     runtime()?.block_on(async {
         let command = task_command(action)?;
-        let result = send(&socket_path(config), command).await?;
+        let result = send(&address, command).await?;
         render(&result, json)
     })
 }
