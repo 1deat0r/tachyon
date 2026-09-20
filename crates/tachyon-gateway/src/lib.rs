@@ -1,9 +1,14 @@
 //! Tachyon Gateway.
 //!
-//! Scaffold only. Implement according to `docs/02_IMPLEMENTATION_SPEC.md` and the
-//! milestone ordering in `docs/04_IMPLEMENTATION_PLAN.md`.
+//! Local IPC lifecycle and command dispatch over the core (spec §36–§37).
+//! The gateway is a transport adapter: Unix domain socket, length-prefixed
+//! JSON frames, one supervisor registry. Remote transport is a separate,
+//! opt-in, authenticated surface and stays disabled.
 
 #![warn(unsafe_code)]
 
-/// Marker proving the crate is wired into the workspace scaffold.
-pub const CRATE_NAME: &str = "tachyon-gateway";
+mod endpoint;
+mod server;
+
+pub use endpoint::{ClaimPaths, EndpointInfo, claim_runtime_dir};
+pub use server::{GatewayError, RunningGateway, start};

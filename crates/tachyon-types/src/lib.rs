@@ -16,7 +16,9 @@ use uuid::Uuid;
 macro_rules! define_id {
     ($(#[$meta:meta])* $name:ident) => {
         $(#[$meta])*
-        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+        #[derive(
+            Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+        )]
         pub struct $name(pub Uuid);
 
         impl $name {
@@ -30,6 +32,14 @@ macro_rules! define_id {
         impl Display for $name {
             fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
                 Display::fmt(&self.0, f)
+            }
+        }
+
+        impl std::str::FromStr for $name {
+            type Err = uuid::Error;
+
+            fn from_str(raw: &str) -> Result<Self, Self::Err> {
+                Uuid::parse_str(raw).map(Self)
             }
         }
     };
@@ -191,6 +201,7 @@ mod tests {
         assert_eq!(a, back);
         assert_eq!(a.to_string(), a.0.to_string());
         assert_eq!(Uuid::parse_str(&a.to_string()).unwrap(), a.0);
+        assert_eq!(a.to_string().parse::<TaskId>().unwrap(), a);
     }
 
     #[test]

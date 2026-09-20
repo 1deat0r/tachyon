@@ -4,9 +4,21 @@ This file is updated by the implementing agent after every milestone.
 
 ## Current milestone
 
-Milestone 1 — Durable task kernel (Milestone 0 complete, see gates below)
+Milestone 2 — Execution IR + scheduler (Milestone 1 complete, see gates below)
 
 ## Completed gates
+
+- 2026-09-20 Milestone 1 — Durable task kernel: SQLite `state.db`
+  (WAL/FULL/FKs/busy-timeout, single-writer `StoreWriter`, migrations),
+  append-only journal + snapshots (every 100 events, terminal states),
+  `TaskState`/supervisor actor (mailbox 256, journal-before-state,
+  revision bumps, terminal discipline), gateway lifecycle (0700 dir,
+  endpoint file, stale eviction, Unix socket, framed JSON dispatch),
+  CLI client (`gateway`, `session create`, `task create/list/get/send/
+  pause/resume/cancel`). Gate: `fmt --check`, `check`, `test` (21 passed,
+  0 failed incl. gateway restart-recovery test), `clippy -D warnings`,
+  plus live `kill -9` gate: task recovered at rev 1 with same
+  objective/status and continued to rev 2.
 
 - 2026-09-20 Milestone 0 — Foundation: `tachyon-types` (UUIDv7 ids,
   RFC 3339 timestamps), `tachyon-protocol` skeleton (versioned

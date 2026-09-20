@@ -209,6 +209,36 @@ pub enum GatewayEvent {
     },
 }
 
+/// Gateway-to-client command result. Success payloads are plain JSON so
+/// new commands do not force protocol version bumps; failures carry a
+/// stable machine-readable code plus a human message.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResponseEnvelope {
+    /// Must equal [`PROTOCOL_VERSION`].
+    pub protocol_version: u16,
+    /// Echoes the request being answered.
+    pub request_id: EventId,
+    /// The outcome.
+    pub result: CommandResult,
+}
+
+/// Outcome of one gateway command.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CommandResult {
+    /// Command succeeded; payload shape depends on the command.
+    Ok {
+        /// Result payload.
+        payload: serde_json::Value,
+    },
+    /// Command failed; nothing it proposed was executed.
+    Err {
+        /// Stable machine-readable code (`unknown_task`, `illegal_transition`, …).
+        code: String,
+        /// Human-readable message.
+        message: String,
+    },
+}
+
 /// Rejects any peer that does not speak [`PROTOCOL_VERSION`].
 pub fn check_version(got: u16) -> Result<(), ProtocolError> {
     if got == PROTOCOL_VERSION {
