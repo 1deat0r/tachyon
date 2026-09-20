@@ -49,7 +49,7 @@ async fn call(socket: &Path, command: Command) -> Value {
 async fn restart_recovers_task_and_continues() {
     let dir = test_dir();
     let gateway = start(&dir).await.unwrap();
-    let socket = gateway.socket_path().to_owned();
+    let socket = gateway.address().to_owned();
 
     let session = call(&socket, Command::CreateSession).await;
     let session_id = session["session_id"].as_str().unwrap().to_owned();
@@ -75,7 +75,7 @@ async fn restart_recovers_task_and_continues() {
 
     // Fresh process-equivalent over the same data directory.
     let gateway = start(&dir).await.unwrap();
-    let socket = gateway.socket_path().to_owned();
+    let socket = gateway.address().to_owned();
 
     let fetched = call(
         &socket,

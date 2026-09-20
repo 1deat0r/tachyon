@@ -68,6 +68,7 @@ struct GatewayState {
 /// after in-flight connections drain.
 pub struct RunningGateway {
     socket_path: PathBuf,
+    address: PathBuf,
     paths: ClaimPaths,
     state: Arc<GatewayState>,
     shutdown: CancellationToken,
@@ -75,10 +76,16 @@ pub struct RunningGateway {
 }
 
 impl RunningGateway {
-    /// Socket clients connect to.
+    /// Socket path (Unix) or runtime dir anchor (Windows) for display.
     #[must_use]
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
+    }
+
+    /// Address clients connect to: socket path on Unix, pipe name on Windows.
+    #[must_use]
+    pub fn address(&self) -> &Path {
+        &self.address
     }
 
     /// Signals shutdown, drains connections, drops supervisors, closes
@@ -101,7 +108,8 @@ pub async fn start(data_dir: &Path) -> Result<RunningGateway, GatewayError> {
         other => GatewayError::Endpoint(other),
     })?;
     let listener = Listener::bind(&paths.socket)?;
-    write_endpoint(&paths, &listener.local_address())?;
+    let address = listener.local_address();
+    write_endpoint(&paths, &address)?;
     let store = Arc::new(StoreWriter::open(data_dir).await?);
     let state = Arc::new(GatewayState {
         store,
@@ -112,6 +120,7 @@ pub async fn start(data_dir: &Path) -> Result<RunningGateway, GatewayError> {
     let accept_loop = tokio::spawn(accept_loop(listener, state.clone(), shutdown.clone()));
     Ok(RunningGateway {
         socket_path: paths.socket.clone(),
+        address,
         paths,
         state,
         shutdown,
