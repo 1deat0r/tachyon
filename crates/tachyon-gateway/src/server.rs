@@ -20,6 +20,7 @@ use tachyon_types::{ApprovalId, SessionId, TaskId, WorkspaceId};
 use thiserror::Error;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::sync::Mutex;
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -68,6 +69,7 @@ struct GatewayState {
 pub struct RunningGateway {
     socket_path: PathBuf,
     paths: ClaimPaths,
+    state: Arc<GatewayState>,
     shutdown: CancellationToken,
     accept_loop: tokio::task::JoinHandle<()>,
 }
@@ -79,10 +81,13 @@ impl RunningGateway {
         &self.socket_path
     }
 
-    /// Signals shutdown, waits for connections to drain, releases the
-    /// runtime dir.
+    /// Signals shutdown, drains connections, drops supervisors, closes
+    /// the pool, then releases the runtime dir. After this returns, the
+    /// data directory may be moved or deleted on any platform.
     pub async fn shutdown(self) {
         self.shutdown.cancel();
+        self.state.supervisors.lock().await.clear();
+        self.state.store.close().await;
         let _ = self.accept_loop.await;
         release_runtime_dir(&self.paths);
     }
@@ -104,10 +109,11 @@ pub async fn start(data_dir: &Path) -> Result<RunningGateway, GatewayError> {
     });
     recover_incomplete(&state).await?;
     let shutdown = CancellationToken::new();
-    let accept_loop = tokio::spawn(accept_loop(listener, state, shutdown.clone()));
+    let accept_loop = tokio::spawn(accept_loop(listener, state.clone(), shutdown.clone()));
     Ok(RunningGateway {
         socket_path: paths.socket.clone(),
         paths,
+        state,
         shutdown,
         accept_loop,
     })
@@ -128,13 +134,14 @@ async fn recover_incomplete(state: &Arc<GatewayState>) -> Result<(), GatewayErro
 }
 
 async fn accept_loop(listener: Listener, state: Arc<GatewayState>, shutdown: CancellationToken) {
+    let mut connections = JoinSet::new();
     loop {
         tokio::select! {
             () = shutdown.cancelled() => break,
             accepted = listener.accept() => {
                 match accepted {
                     Ok(stream) => {
-                        tokio::spawn(serve_connection(stream, state.clone(), shutdown.clone()));
+                        connections.spawn(serve_connection(stream, state.clone(), shutdown.clone()));
                     }
                     Err(_) => {
                         if shutdown.is_cancelled() {
@@ -145,6 +152,10 @@ async fn accept_loop(listener: Listener, state: Arc<GatewayState>, shutdown: Can
             }
         }
     }
+    // Connections are stateless request handlers; aborting between requests
+    // is safe and lets shutdown complete without waiting on idle clients.
+    connections.abort_all();
+    while connections.join_next().await.is_some() {}
 }
 
 async fn serve_connection(

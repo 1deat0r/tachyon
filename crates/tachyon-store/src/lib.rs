@@ -261,6 +261,13 @@ impl StoreWriter {
         Ok(())
     }
 
+    /// Closes the pool, waiting for checked-out connections to return.
+    /// Call before deleting the data directory (mandatory on Windows,
+    /// where open files cannot be removed).
+    pub async fn close(&self) {
+        self.pool.close().await;
+    }
+
     /// Loads a task row, or `None` when absent.
     pub async fn load_task(&self, task_id: &str) -> Result<Option<TaskRow>, StoreError> {
         sqlx::query_as::<_, TaskRow>("SELECT * FROM tasks WHERE id = ?")
@@ -405,6 +412,7 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, super::StoreError::TaskNotFound { .. }));
 
+        store.close().await;
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -421,6 +429,7 @@ mod tests {
             .await
             .unwrap();
         assert!(store.incomplete_tasks().await.unwrap().is_empty());
+        store.close().await;
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

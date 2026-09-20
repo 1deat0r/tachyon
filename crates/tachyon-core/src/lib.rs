@@ -790,6 +790,8 @@ mod tests {
         assert_eq!(cancelled.status, TaskStatus::Cancelled);
         let err = handle.add_message("too late".to_owned()).await.unwrap_err();
         assert!(matches!(err, super::CoreError::IllegalTransition { .. }));
+        drop(handle);
+        store.close().await;
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -819,6 +821,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(continued.revision, 2);
+        drop(recovered);
+        store.close().await;
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -844,6 +848,8 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(row.snapshot_seq.unwrap_or(-1) >= 100);
+        drop(handle);
+        store.close().await;
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
