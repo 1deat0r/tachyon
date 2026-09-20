@@ -72,6 +72,7 @@ const IMPLEMENTED: &[&str] = &[
     "tachyon-app",
     "tachyon-scheduler",
     "tachyon-policy",
+    "tachyon-tools",
 ];
 
 #[test]

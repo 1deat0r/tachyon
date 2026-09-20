@@ -239,7 +239,9 @@ impl Policy {
 /// material change invalidates bound approvals.
 #[must_use]
 pub fn operation_hash(operation: &serde_json::Value) -> String {
-    blake3::hash(canonical_json(operation).as_bytes()).to_hex()
+    blake3::hash(&canonical_json(operation))
+        .to_hex()
+        .to_string()
 }
 
 fn canonical_json(value: &serde_json::Value) -> Vec<u8> {
@@ -514,9 +516,9 @@ mod tests {
         assert!(
             matches!(
                 result,
-                Err(ContainmentError::SymlinkEscape(_))
-                    | Err(ContainmentError::AbsoluteOutsideRequest(_))
-                    | Err(ContainmentError::OutsideRoots(_))
+                Err(ContainmentError::SymlinkEscape(_)
+                    | ContainmentError::AbsoluteOutsideRequest(_)
+                    | ContainmentError::OutsideRoots(_))
             ),
             "unexpected: {result:?}"
         );

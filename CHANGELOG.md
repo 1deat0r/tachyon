@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Milestone 3: capability policy (scope globs, trusted defaults,
+  hash-bound approvals, path containment) and native tools (contained fs,
+  process runner, read-only git, artifact spool, credential broker).
 - Milestone 2: validated execution IR and conflict-aware DAG scheduler
   (readiness, atomic grants, critical-path priority, retries, timeouts,
   cancellation) with property tests; docs-freshness tripwires in CI.

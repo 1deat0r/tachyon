@@ -4,9 +4,22 @@ This file is updated by the implementing agent after every milestone.
 
 ## Current milestone
 
-Milestone 3 — Capability model + policy (Milestone 2 complete, see gates below)
+Milestone 4 — Repository intelligence (Milestone 3 complete, see gates below)
 
 ## Completed gates
+
+- 2026-09-21 Milestone 3 — Policy + native tools: `tachyon-policy`
+  (capability/scope globs, trusted-workspace defaults, denials-first
+  decisions, BLAKE3 canonical operation hashes, hash-bound approvals,
+  real path containment with traversal/symlink rejection), `tachyon-tools`
+  (capability registry, contained fs read/list/metadata/write, concurrent
+  process runner with bounded inline + artifact spool + redaction,
+  allowlisted read-only git, content-addressed artifact store with zstd
+  above 64 KiB, credential-handle broker with output redaction). Gate:
+  `fmt --check`, `check`, `test` (all suites green incl. 7 policy tests +
+  11 tools-gate tests: local auto-allow, outside-write approval flow,
+  deny posture, traversal/symlink escape, git allowlist, artifact
+  roundtrip, secret redaction), `clippy -D warnings`.
 
 - 2026-09-21 Milestone 2 — Execution IR + scheduler: `tachyon-ir`
   (validated DAG: identity/invocation/dataflow/bindings/purity/effects,
