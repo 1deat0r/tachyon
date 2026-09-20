@@ -1,9 +1,17 @@
 //! Tachyon Scheduler.
 //!
-//! Scaffold only. Implement according to `docs/02_IMPLEMENTATION_SPEC.md` and the
-//! milestone ordering in `docs/04_IMPLEMENTATION_PLAN.md`.
+//! Dependency-aware, effect-aware DAG execution (spec §11–§14).
+//! Readiness, atomic conflict/resource grants, critical-path priority,
+//! retries, timeouts, and structured cancellation live here; executors
+//! own only single-node work.
 
 #![warn(unsafe_code)]
 
-/// Marker proving the crate is wired into the workspace scaffold.
-pub const CRATE_NAME: &str = "tachyon-scheduler";
+pub mod executor;
+pub mod scheduler;
+
+pub use executor::{Executor, FakeExecutor, NodeOutcome, OutcomeStatus, ResolvedInputs, Tracker};
+pub use scheduler::{
+    Budgets, ExecutorRegistry, SchedulerCommand, SchedulerError, SchedulerHandle, TaskRunSnapshot,
+    spawn,
+};

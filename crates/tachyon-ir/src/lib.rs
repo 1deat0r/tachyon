@@ -1,21 +1,22 @@
 //! Tachyon Ir.
 //!
-//! Validated, machine-readable execution graphs (spec §5–§8).
+//! Validated, machine-readable execution graphs (spec §5–§9).
 //!
-//! Milestone 1 scope: graph shape (nodes, dependencies), cycle and
-//! reference validation. Executor kinds, invocations, access/resource
-//! claims, and retry/cancellation/verification metadata arrive in
-//! Milestone 2, which extends [`ExecutionNode`] without changing the
-//! validation guarantees established here.
+//! Every scheduler-visible operation exists here first: identity, executor,
+//! invocation, dataflow bindings, access/effect/resource declarations, and
+//! retry/cancellation/verification metadata. [`ExecutionGraph::validate`]
+//! rejects unknown references, cycles, non-ancestor dataflow, speculative
+//! mutation, and malformed invocations before anything runs.
 
 #![warn(unsafe_code)]
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use thiserror::Error;
 
-use tachyon_types::{NodeId, TaskId};
+use tachyon_types::{CapabilityId, NodeId, ProviderId, TaskId};
 
 /// IR schema version. Bump on any breaking graph change.
 pub const IR_VERSION: u16 = 1;
@@ -32,29 +33,480 @@ pub enum IrError {
     /// A node belongs to a different task than the graph.
     #[error("node {0} belongs to another task")]
     ForeignTask(NodeId),
+    /// An input binding names a node that is not an ancestor.
+    #[error("node {node} reads input from non-ancestor {from}")]
+    DanglingInput {
+        /// Node holding the binding.
+        node: NodeId,
+        /// Purported upstream node.
+        from: NodeId,
+    },
+    /// A speculative node declares a mutating effect. MVP speculation is
+    /// pure/read-only only (spec §14).
+    #[error("speculative node {0} declares a mutating effect")]
+    SpeculativeMutation(NodeId),
+    /// Invocation names no capability.
+    #[error("node {0} has an empty capability")]
+    EmptyCapability(NodeId),
+    /// Invocation args must be a JSON object.
+    #[error("node {0} has non-object invocation args")]
+    InvalidArgs(NodeId),
+    /// Retry policy must allow at least one attempt.
+    #[error("node {0} declares zero retry attempts")]
+    InvalidRetry(NodeId),
+    /// Resource key does not parse (`kind:path`, no `..`).
+    #[error("invalid resource key {key:?}: {reason}")]
+    InvalidResource {
+        /// Offending key text.
+        key: String,
+        /// Why it was rejected.
+        reason: String,
+    },
 }
 
-/// One scheduled operation. Milestone 2 adds executor, invocation,
-/// access/effect/resource metadata; the identity fields here are stable.
+/// Where a node executes (spec §5). Used as an executor-registry key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ExecutorKind {
+    /// In-process deterministic computation.
+    Native,
+    /// Repository intelligence queries.
+    Repository,
+    /// Evidence retrieval and ranking.
+    Retrieval,
+    /// Native tool capabilities.
+    Tool,
+    /// Bounded semantic judgment.
+    Judgment,
+    /// Model reasoning.
+    Model,
+    /// Filesystem mutation batches.
+    Mutation,
+    /// Verification commands.
+    Verification,
+    /// Commit barrier; never executes work itself.
+    Barrier,
+}
+
+/// What to run: a capability plus schema-validated JSON args (spec §5).
+/// Provider-native tool calls enter the graph only as proposed
+/// invocations; validation and policy treat them like any other.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExecutionNode {
-    /// Unique node identity.
-    pub id: NodeId,
-    /// Task that owns this node.
-    pub task_id: TaskId,
-    /// Task revision this node was planned against (spec §5).
-    pub planned_revision: u64,
+pub struct Invocation {
+    /// Capability id from the registry.
+    pub capability: CapabilityId,
+    /// Arguments object.
+    pub args: Value,
 }
 
-/// Ordering edge: `to` runs only after `from` completes as required.
-/// Dependency conditions (`OnSuccess`/`OnFailure`/`OnCompletion`) arrive
-/// in Milestone 2; until then every edge means success-required.
+/// One named input fed from an ancestor's structured output (spec §8).
+/// Hidden implicit data dependencies are prohibited: every cross-node
+/// value flows through a binding validated here.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InputBinding {
+    /// Local input name.
+    pub name: String,
+    /// Ancestor node producing the value.
+    pub from: NodeId,
+    /// JSON pointer into the ancestor's output (RFC 6901, e.g. `/files/0`).
+    pub pointer: String,
+}
+
+/// One named output a node promises to produce.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutputBinding {
+    /// Output name.
+    pub name: String,
+}
+
+/// Normalized resource key: `kind:/path` or `kind:/path/**` (spec §9).
+/// The `/**` suffix marks a recursive claim over all descendants.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ResourceKey(pub String);
+
+/// Parsed key parts (kind validated at parse; overlap is segment-based).
+struct KeyParts {
+    segments: Vec<String>,
+    recursive: bool,
+}
+
+impl ResourceKey {
+    /// Parses and normalizes `kind:path`. Rejects empty kinds/paths,
+    /// `..` segments, and `.` segments are dropped.
+    pub fn parse(raw: &str) -> Result<Self, IrError> {
+        let (kind, path) = raw
+            .split_once(':')
+            .ok_or_else(|| IrError::InvalidResource {
+                key: raw.to_owned(),
+                reason: "expected `kind:path`".to_owned(),
+            })?;
+        if kind.is_empty() {
+            return Err(IrError::InvalidResource {
+                key: raw.to_owned(),
+                reason: "empty kind".to_owned(),
+            });
+        }
+        let recursive = path.strip_suffix("/**").is_some();
+        let body = path.strip_suffix("/**").unwrap_or(path);
+        let mut segments = Vec::new();
+        for segment in body.split('/') {
+            if segment.is_empty() || segment == "." {
+                continue;
+            }
+            if segment == ".." {
+                return Err(IrError::InvalidResource {
+                    key: raw.to_owned(),
+                    reason: "`..` segments are not allowed".to_owned(),
+                });
+            }
+            segments.push(segment.to_owned());
+        }
+        if segments.is_empty() {
+            return Err(IrError::InvalidResource {
+                key: raw.to_owned(),
+                reason: "empty path".to_owned(),
+            });
+        }
+        let mut normalized = format!("{kind}:/{}", segments.join("/"));
+        if recursive {
+            normalized.push_str("/**");
+        }
+        Ok(Self(normalized))
+    }
+
+    fn parts(&self) -> KeyParts {
+        let path = self
+            .0
+            .split_once(':')
+            .map_or(self.0.as_str(), |(_, path)| path);
+        let recursive = path.strip_suffix("/**").is_some();
+        let body = path.strip_suffix("/**").unwrap_or(path);
+        KeyParts {
+            segments: body
+                .split('/')
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .collect(),
+            recursive,
+        }
+    }
+
+    /// Hierarchical overlap (spec §9): equal paths overlap; a recursive
+    /// key overlaps its own subtree in either direction. Comparison is on
+    /// path segments alone — kinds are labels, so a `dir:` claim and a
+    /// `file:` claim over the same path conservatively conflict.
+    #[must_use]
+    pub fn overlaps(&self, other: &Self) -> bool {
+        let left = self.parts();
+        let right = other.parts();
+        if left.segments == right.segments {
+            return true;
+        }
+        if left.recursive && starts_with(&right.segments, &left.segments) {
+            return true;
+        }
+        if right.recursive && starts_with(&left.segments, &right.segments) {
+            return true;
+        }
+        false
+    }
+}
+
+fn starts_with(path: &[String], prefix: &[String]) -> bool {
+    path.len() >= prefix.len() && path[..prefix.len()] == *prefix
+}
+
+/// Declared data access (spec §9). Read/read is compatible; anything
+/// involving a write conflicts on overlap.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccessSet {
+    /// Resources read.
+    pub reads: Vec<ResourceKey>,
+    /// Resources written.
+    pub writes: Vec<ResourceKey>,
+}
+
+impl AccessSet {
+    /// True when both sets cannot run concurrently.
+    #[must_use]
+    pub fn conflicts_with(&self, other: &Self) -> bool {
+        for write in &self.writes {
+            if other
+                .reads
+                .iter()
+                .chain(&other.writes)
+                .any(|key| write.overlaps(key))
+            {
+                return true;
+            }
+        }
+        for write in &other.writes {
+            if self.reads.iter().any(|key| write.overlaps(key)) {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// Capacity a node asks the scheduler to reserve (spec §10). Claims are
+/// initial estimates; the scheduler calibrates them from measurements later.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourceClaim {
+    /// CPU shares (whole cores = 1000).
+    pub cpu_units: u16,
+    /// Memory in MiB, when known.
+    pub memory_mb: Option<u32>,
+    /// Process slots (build/test runners).
+    pub process_slots: u8,
+    /// Concurrent network operations.
+    pub network_slots: u8,
+    /// GPU memory in MiB, when claimed.
+    pub gpu_memory_mb: Option<u32>,
+    /// Pinned provider, when the node needs one.
+    pub provider: Option<ProviderId>,
+}
+
+impl Default for ResourceClaim {
+    fn default() -> Self {
+        Self {
+            cpu_units: 100,
+            memory_mb: None,
+            process_slots: 0,
+            network_slots: 0,
+            gpu_memory_mb: None,
+            provider: None,
+        }
+    }
+}
+
+/// Consequence class of running the node (spec §19).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EffectClass {
+    /// No observable effect (pure computation).
+    Pure,
+    /// Local reads only.
+    ReadOnlyLocal,
+    /// Local writes that can be undone.
+    ReversibleLocalMutation,
+    /// Local writes that cannot be undone.
+    DestructiveLocalMutation,
+    /// External writes with a recovery path.
+    ReversibleExternalMutation,
+    /// External writes without one.
+    DestructiveExternalMutation,
+    /// Credential, privilege, or deployment scope.
+    Privileged,
+}
+
+impl EffectClass {
+    /// MVP speculation allows only side-effect-free nodes (spec §14).
+    #[must_use]
+    pub fn speculation_safe(self) -> bool {
+        matches!(self, Self::Pure | Self::ReadOnlyLocal)
+    }
+}
+
+/// What recovery may assume after a crash (spec §19).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Idempotency {
+    /// No effect; always safe to rerun.
+    Pure,
+    /// Same inputs always produce the same state.
+    Idempotent,
+    /// Safe to retry with the same key.
+    Keyed,
+    /// Remote state can be inspected to decide.
+    Queryable,
+    /// A declared compensation exists.
+    Compensatable,
+    /// Must never be blindly replayed.
+    NonIdempotent,
+    /// Semantics not yet declared; treated as non-idempotent.
+    Unknown,
+}
+
+/// Whether the scheduler may run this node speculatively (spec §14).
+/// MVP speculation never mutates: validated in [`ExecutionGraph::validate`]
+/// and re-checked at dispatch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SpeculationPolicy {
+    /// Never speculative.
+    Forbidden,
+    /// May run ahead when capacity is free.
+    Allowed,
+    /// Prefer running early.
+    Preferred,
+}
+
+/// Wall-clock bound for one attempt. `None` means no timeout.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimeoutPolicy {
+    /// Hard timeout in milliseconds.
+    pub hard_ms: Option<u64>,
+}
+
+/// Retry policy owned by the IR: no hidden infinite retries (spec §40).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetryPolicy {
+    /// Total attempts including the first (minimum 1).
+    pub attempts: u32,
+    /// Backoff between attempts in milliseconds.
+    pub backoff_ms: u64,
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self {
+            attempts: 1,
+            backoff_ms: 0,
+        }
+    }
+}
+
+/// How the scheduler stops a running node (spec §12).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CancellationPolicy {
+    /// Abort immediately.
+    Immediate,
+    /// Request stop, then abort after the grace period.
+    Graceful {
+        /// Milliseconds before forced abort.
+        grace_ms: u64,
+    },
+    /// Past the commit point the node must finish (Milestone 8 refines).
+    NonCancellableAfterCommit,
+}
+
+/// One acceptance check this node feeds. Typed clause kinds arrive with
+/// Milestone 9; the description is enough for planning until then.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerificationRequirement {
+    /// What the check establishes.
+    pub description: String,
+}
+
+/// Explicit scheduling priority; the scheduler adds critical-path weight,
+/// age bonus, and speculation/resource penalties around it (spec §13).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NodePriority {
+    /// Background work; yields to everything.
+    Low,
+    /// Default.
+    #[default]
+    Normal,
+    /// User-visible or blocking work.
+    High,
+    /// Must run as soon as grantable.
+    Critical,
+}
+
+impl NodePriority {
+    #[must_use]
+    pub fn score(self) -> f64 {
+        match self {
+            Self::Low => -10.0,
+            Self::Normal => 0.0,
+            Self::High => 10.0,
+            Self::Critical => 20.0,
+        }
+    }
+}
+
+/// When a dependency edge is satisfied (spec §8).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DependencyCondition {
+    /// Parent succeeded.
+    OnSuccess,
+    /// Parent failed.
+    OnFailure,
+    /// Parent reached any terminal status.
+    OnCompletion,
+}
+
+/// Ordering edge: `to` waits for `from` per `condition`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Dependency {
     /// Upstream node.
     pub from: NodeId,
     /// Downstream node.
     pub to: NodeId,
+    /// Which upstream outcome releases the edge.
+    pub condition: DependencyCondition,
+}
+
+/// Scheduler-visible node state (spec §7).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NodeStatus {
+    /// Waiting on dependencies.
+    Pending,
+    /// Dependencies satisfied; waiting on grants.
+    Ready,
+    /// Executing.
+    Running,
+    /// Work before a commit barrier is done; effect not yet committed.
+    Prepared,
+    /// Blocked on a policy approval.
+    WaitingApproval,
+    /// Finished successfully.
+    Succeeded,
+    /// Finished with failure.
+    Failed,
+    /// Cancelled; will not run.
+    Cancelled,
+    /// A dependency can never be satisfied; will not run.
+    Skipped,
+    /// Crashed mid-effect with unknown outcome; needs reconciliation.
+    UnknownAfterCrash,
+}
+
+impl NodeStatus {
+    /// Terminal states release dependents and free grants.
+    #[must_use]
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Succeeded | Self::Failed | Self::Cancelled | Self::Skipped
+        )
+    }
+}
+
+/// One scheduled operation (spec §5).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionNode {
+    /// Unique node identity.
+    pub id: NodeId,
+    /// Task that owns this node.
+    pub task_id: TaskId,
+    /// Task revision this node was planned against.
+    pub planned_revision: u64,
+    /// Where the node runs.
+    pub executor: ExecutorKind,
+    /// Capability plus args.
+    pub invocation: Invocation,
+    /// Named values fed from ancestors.
+    pub inputs: Vec<InputBinding>,
+    /// Named values produced for descendants.
+    pub expected_outputs: Vec<OutputBinding>,
+    /// Declared data access.
+    pub access: AccessSet,
+    /// Declared capacity needs.
+    pub resources: ResourceClaim,
+    /// Consequence class.
+    pub effect_class: EffectClass,
+    /// Crash-recovery semantics.
+    pub idempotency: Idempotency,
+    /// Speculative execution permission.
+    pub speculation: SpeculationPolicy,
+    /// Per-attempt wall-clock bound.
+    pub timeout: TimeoutPolicy,
+    /// Retry budget.
+    pub retry: RetryPolicy,
+    /// Stop behavior.
+    pub cancellation: CancellationPolicy,
+    /// Acceptance checks this node feeds.
+    pub verification: Vec<VerificationRequirement>,
+    /// Explicit priority.
+    pub priority: NodePriority,
 }
 
 /// A validated, dependency-aware execution graph (spec §5).
@@ -79,12 +531,50 @@ impl ExecutionGraph {
         }
     }
 
-    /// Validates structural invariants: node/task ownership, reference
-    /// existence, and acyclicity.
+    /// All strict ancestors of `node`: nodes with a directed path to it.
+    #[must_use]
+    pub fn ancestors(&self, node: NodeId) -> BTreeSet<NodeId> {
+        let mut incoming: BTreeMap<NodeId, Vec<NodeId>> = BTreeMap::new();
+        for edge in &self.dependencies {
+            incoming.entry(edge.to).or_default().push(edge.from);
+        }
+        let mut seen = BTreeSet::new();
+        let mut stack: Vec<NodeId> = incoming.get(&node).cloned().unwrap_or_default();
+        while let Some(current) = stack.pop() {
+            if seen.insert(current) {
+                stack.extend(incoming.get(&current).cloned().unwrap_or_default());
+            }
+        }
+        seen
+    }
+
+    /// Validates structural and semantic invariants (spec §6):
+    /// ownership, reference existence, acyclicity, input ancestry,
+    /// speculation/effect consistency, invocation shape, retry budget.
+    /// Capability-schema and hard-constraint checks belong to the
+    /// Milestone 3 registry and core; the invocation shape check here
+    /// (non-empty capability, object args) is the M2 prerequisite.
     pub fn validate(&self, task_id: TaskId) -> Result<(), IrError> {
         for node in self.nodes.values() {
             if node.task_id != task_id {
                 return Err(IrError::ForeignTask(node.id));
+            }
+            if node.invocation.capability.0.is_empty() {
+                return Err(IrError::EmptyCapability(node.id));
+            }
+            if !node.invocation.args.is_object() {
+                return Err(IrError::InvalidArgs(node.id));
+            }
+            if node.retry.attempts == 0 {
+                return Err(IrError::InvalidRetry(node.id));
+            }
+            if !matches!(node.speculation, SpeculationPolicy::Forbidden)
+                && !node.effect_class.speculation_safe()
+            {
+                return Err(IrError::SpeculativeMutation(node.id));
+            }
+            for key in node.access.reads.iter().chain(&node.access.writes) {
+                ResourceKey::parse(&key.0)?;
             }
         }
         for edge in &self.dependencies {
@@ -97,6 +587,20 @@ impl ExecutionGraph {
         }
         if has_cycle(&self.nodes, &self.dependencies) {
             return Err(IrError::Cycle);
+        }
+        for node in self.nodes.values() {
+            let ancestors = self.ancestors(node.id);
+            for input in &node.inputs {
+                if !self.nodes.contains_key(&input.from) {
+                    return Err(IrError::UnknownNode(input.from));
+                }
+                if !ancestors.contains(&input.from) {
+                    return Err(IrError::DanglingInput {
+                        node: node.id,
+                        from: input.from,
+                    });
+                }
+            }
         }
         Ok(())
     }
@@ -142,15 +646,50 @@ fn has_cycle(nodes: &BTreeMap<NodeId, ExecutionNode>, edges: &[Dependency]) -> b
 
 #[cfg(test)]
 mod tests {
-    use super::{Dependency, ExecutionNode};
-    use super::{ExecutionGraph, IrError};
-    use tachyon_types::{NodeId, TaskId};
+    use super::{AccessSet, EffectClass, ExecutionGraph, Idempotency, Invocation, IrError};
+    use super::{CancellationPolicy, ExecutorKind, TimeoutPolicy};
+    use super::{Dependency, DependencyCondition, ExecutionNode};
+    use super::{NodePriority, ResourceClaim, ResourceKey, RetryPolicy, SpeculationPolicy};
+    use tachyon_types::{CapabilityId, NodeId, TaskId};
 
     fn node(task: TaskId) -> ExecutionNode {
         ExecutionNode {
             id: NodeId::generate(),
             task_id: task,
             planned_revision: 0,
+            executor: ExecutorKind::Native,
+            invocation: Invocation {
+                capability: CapabilityId("test.noop".to_owned()),
+                args: serde_json::json!({}),
+            },
+            inputs: vec![],
+            expected_outputs: vec![],
+            access: AccessSet::default(),
+            resources: ResourceClaim::default(),
+            effect_class: EffectClass::Pure,
+            idempotency: Idempotency::Pure,
+            speculation: SpeculationPolicy::Forbidden,
+            timeout: TimeoutPolicy::default(),
+            retry: RetryPolicy::default(),
+            cancellation: CancellationPolicy::Immediate,
+            verification: vec![],
+            priority: NodePriority::Normal,
+        }
+    }
+
+    fn edge(from: NodeId, to: NodeId) -> Dependency {
+        Dependency {
+            from,
+            to,
+            condition: DependencyCondition::OnSuccess,
+        }
+    }
+
+    fn assemble(nodes: Vec<ExecutionNode>, dependencies: Vec<Dependency>) -> ExecutionGraph {
+        ExecutionGraph {
+            version: super::IR_VERSION,
+            nodes: nodes.into_iter().map(|n| (n.id, n)).collect(),
+            dependencies,
         }
     }
 
@@ -166,17 +705,10 @@ mod tests {
         let task = TaskId::generate();
         let first = node(task);
         let second = node(task);
-        let graph = super::ExecutionGraph {
-            version: super::IR_VERSION,
-            nodes: [first.clone(), second.clone()]
-                .into_iter()
-                .map(|n| (n.id, n))
-                .collect(),
-            dependencies: vec![Dependency {
-                from: first.id,
-                to: second.id,
-            }],
-        };
+        let graph = assemble(
+            vec![first.clone(), second.clone()],
+            vec![edge(first.id, second.id)],
+        );
         assert_eq!(graph.validate(task), Ok(()));
     }
 
@@ -185,23 +717,10 @@ mod tests {
         let task = TaskId::generate();
         let first = node(task);
         let second = node(task);
-        let graph = super::ExecutionGraph {
-            version: super::IR_VERSION,
-            nodes: [first.clone(), second.clone()]
-                .into_iter()
-                .map(|n| (n.id, n))
-                .collect(),
-            dependencies: vec![
-                Dependency {
-                    from: first.id,
-                    to: second.id,
-                },
-                Dependency {
-                    from: second.id,
-                    to: first.id,
-                },
-            ],
-        };
+        let graph = assemble(
+            vec![first.clone(), second.clone()],
+            vec![edge(first.id, second.id), edge(second.id, first.id)],
+        );
         assert_eq!(graph.validate(task), Err(IrError::Cycle));
     }
 
@@ -209,22 +728,145 @@ mod tests {
     fn dangling_and_foreign_nodes_are_rejected() {
         let task = TaskId::generate();
         let first = node(task);
-        let graph = super::ExecutionGraph {
-            version: super::IR_VERSION,
-            nodes: [(first.id, first.clone())].into_iter().collect(),
-            dependencies: vec![Dependency {
-                from: first.id,
-                to: NodeId::generate(),
-            }],
-        };
+        let graph = assemble(
+            vec![first.clone()],
+            vec![edge(first.id, NodeId::generate())],
+        );
         assert!(matches!(graph.validate(task), Err(IrError::UnknownNode(_))));
 
         let foreign = node(TaskId::generate());
-        let graph = super::ExecutionGraph {
-            version: super::IR_VERSION,
-            nodes: [(foreign.id, foreign.clone())].into_iter().collect(),
-            dependencies: vec![],
-        };
+        let graph = assemble(vec![foreign.clone()], vec![]);
         assert_eq!(graph.validate(task), Err(IrError::ForeignTask(foreign.id)));
+    }
+
+    #[test]
+    fn input_from_non_ancestor_is_rejected() {
+        let task = TaskId::generate();
+        let first = node(task);
+        let mut second = node(task);
+        second.inputs.push(super::InputBinding {
+            name: "x".to_owned(),
+            from: first.id,
+            pointer: "/result".to_owned(),
+        });
+        // No edge: not an ancestor.
+        let graph = assemble(vec![first.clone(), second.clone()], vec![]);
+        assert!(matches!(
+            graph.validate(task),
+            Err(IrError::DanglingInput { .. })
+        ));
+        // With an edge the same binding is valid.
+        let graph = assemble(
+            vec![first.clone(), second.clone()],
+            vec![edge(first.id, second.id)],
+        );
+        assert_eq!(graph.validate(task), Ok(()));
+    }
+
+    #[test]
+    fn speculative_mutation_is_rejected() {
+        let task = TaskId::generate();
+        let mut speculative = node(task);
+        speculative.speculation = SpeculationPolicy::Allowed;
+        speculative.effect_class = EffectClass::ReversibleLocalMutation;
+        let graph = assemble(vec![speculative.clone()], vec![]);
+        assert_eq!(
+            graph.validate(task),
+            Err(IrError::SpeculativeMutation(speculative.id))
+        );
+
+        speculative.effect_class = EffectClass::ReadOnlyLocal;
+        let graph = assemble(vec![speculative], vec![]);
+        assert_eq!(graph.validate(task), Ok(()));
+    }
+
+    #[test]
+    fn resource_overlap_follows_hierarchy() {
+        let dir = ResourceKey::parse("dir:/workspace/src/**").unwrap();
+        let file = ResourceKey::parse("dir:/workspace/src/auth.rs").unwrap();
+        let other = ResourceKey::parse("dir:/workspace/other.rs").unwrap();
+        let sibling = ResourceKey::parse("dir:/workspace/src/**").unwrap();
+        assert!(dir.overlaps(&file));
+        assert!(file.overlaps(&dir));
+        assert!(!dir.overlaps(&other));
+        assert!(dir.overlaps(&sibling));
+        assert!(file.overlaps(&file));
+        assert!(!file.overlaps(&other));
+
+        let empty_reads = AccessSet::default();
+        let writer = AccessSet {
+            reads: vec![],
+            writes: vec![file.clone()],
+        };
+        let reader = AccessSet {
+            reads: vec![file.clone()],
+            writes: vec![],
+        };
+        let unrelated = AccessSet {
+            reads: vec![other],
+            writes: vec![],
+        };
+        assert!(!empty_reads.conflicts_with(&empty_reads));
+        assert!(!empty_reads.conflicts_with(&reader));
+        assert!(writer.conflicts_with(&reader));
+        assert!(writer.conflicts_with(&writer));
+        assert!(!writer.conflicts_with(&unrelated));
+        assert!(!reader.conflicts_with(&unrelated));
+    }
+
+    #[test]
+    fn malformed_nodes_are_rejected() {
+        let task = TaskId::generate();
+        let mut bad = node(task);
+        bad.invocation.capability = CapabilityId(String::new());
+        assert_eq!(
+            assemble(vec![bad.clone()], vec![]).validate(task),
+            Err(IrError::EmptyCapability(bad.id))
+        );
+
+        let mut bad = node(task);
+        bad.invocation.args = serde_json::json!([]);
+        assert_eq!(
+            assemble(vec![bad.clone()], vec![]).validate(task),
+            Err(IrError::InvalidArgs(bad.id))
+        );
+
+        let mut bad = node(task);
+        bad.retry.attempts = 0;
+        assert_eq!(
+            assemble(vec![bad.clone()], vec![]).validate(task),
+            Err(IrError::InvalidRetry(bad.id))
+        );
+
+        let mut bad = node(task);
+        bad.access.writes = vec![ResourceKey("dir:/a/../b".to_owned())];
+        assert!(matches!(
+            assemble(vec![bad], vec![]).validate(task),
+            Err(IrError::InvalidResource { .. })
+        ));
+    }
+
+    #[test]
+    fn ancestors_cover_diamonds() {
+        let task = TaskId::generate();
+        let top = node(task);
+        let left = node(task);
+        let right = node(task);
+        let bottom = node(task);
+        let graph = assemble(
+            vec![top.clone(), left.clone(), right.clone(), bottom.clone()],
+            vec![
+                edge(top.id, left.id),
+                edge(top.id, right.id),
+                edge(left.id, bottom.id),
+                edge(right.id, bottom.id),
+            ],
+        );
+        assert_eq!(graph.validate(task), Ok(()));
+        assert_eq!(
+            graph.ancestors(bottom.id),
+            [top.id, left.id, right.id].into_iter().collect()
+        );
+        assert!(graph.ancestors(top.id).is_empty());
     }
 }
