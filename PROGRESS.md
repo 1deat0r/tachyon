@@ -4,9 +4,65 @@ This file is updated by the implementing agent after every milestone.
 
 ## Current milestone
 
-Milestone 8 — Mutation engine (Milestone 7 complete, see gates below)
+Milestone 9 — Verification (Milestone 8 complete, see gates below)
 
 ## Completed gates
+
+- 2026-09-21 Milestone 8 — Mutation engine: `tachyon-mutation`
+  (PatchSpec + base-hash guard, fsync'd batch journal with torn-tail
+  repair, preimage retention in the artifact spool, temp staging beside
+  targets, per-file rename with commit-time re-verification, finish or
+  compensate recovery with divergence freeze, changed-file events).
+  Vertical Slice C ("Fix the incorrect implementation") replaces the
+  `==` token compare with constant-time equality end to end. Gate:
+  crash injection between every file commit (k=0..=3) recovers coherent;
+  stale preimages refused at prepare and at commit; 19 tests (8 unit +
+  11 gate); `fmt`, `check`, `clippy -D warnings` clean.
+- 2026-09-21 R1 board (5 seats): spec BUILD, security BUILD, API
+  conditional BUILD, correctness HOLD, adversarial HOLD — both HOLDs
+  with executed proof (symlink-cycle sweep hang, `contains` sweep
+  deleting user files, poisoned batch denying siblings, aliasing dup
+  paths, torn restore, vacuous empty completion, commit check-then-act).
+  Adjudication: all findings accepted except race preventability
+  (inherent to recoverable-not-atomic; post-rename detection added).
+  Fixes: symlink-blind exact-pattern sweep keyed by relative temp path,
+  per-batch isolation with `batch_errors`, canonical normalization,
+  single-read prepare, retained postimage spool with temp re-staging,
+  post-rename verify (`Diverged` abort), atomic restore via temp+rename,
+  post-action sweep, lenient replay with `journal_gaps`,
+  `UnknownBatch` plan cross-check, containment into `InvalidPath`,
+  serde-stable reports, `MutationBatch` struct removed. R2 verify
+  dispatched on the fixed tree.
+- 2026-09-21 R2 board (5 seats): 4 BUILD (spec-fixes, security,
+  API, adversarial) + 1 HOLD (correctness, 8 fresh executed bugs in
+  the new code). Adjudication: 7 accepted as real (P1 same-ms temp
+  collision, P2 compensated batch finished, P3 vacuous empty
+  completion, P5 dotless restore temps, P6 rmdir of user dirs, P7
+  unbound `post_artifact`, P8 sweep IO aborting recovery); P4
+  (corrupt journal bricks finish) stays fail-closed per security +
+  adversarial seats, docs rescoped to name the hand-repair path.
+  Fixes: full-id temp names, finish refuses compensated batches and
+  completes only non-empty all-`Committed`, `post_artifact` bound in
+  plan check, dot-prefixed restore temps, rmdir removed, best-effort
+  sweep with `sweep_errors`. 2 new gate tests (same-ms temps,
+  no-resurrect); 21 tests (8 unit + 13 gate), full workspace gates
+  green (46 suites). R3 verify dispatched.
+- 2026-09-21 R3 board (3 seats): 2 BUILD (correctness re-probe of all
+  7 Ps with executed proof, spec) + 1 narrow HOLD (adversarial:
+  stale-descriptor resurrection via commit after compensate —
+  re-applies and seals against future recovery, executed). Fix:
+  `commit_up_to` refuses journaled-rolled-back batches with new
+  non-retryable `MutationError::Compensated`; resume is fresh prepare
+  only. Gate test `stale_descriptor_commit_after_compensate_refused`;
+  22 tests (8 unit + 14 gate), full workspace gates green
+  (46 suites). R4 verify dispatched.
+- 2026-09-21 R4 single seat (correctness + spec): BUILD — resurrection
+  fix re-probed with independent executed checks (stale commit refused
+  `Compensated`, non-retryable, disk untouched, future recovery clean;
+  fresh prepare on the same path still completes; no false
+  `Compensated` on normal/partial flows), M8 Build items + Slice C +
+  crash gate all green. Milestone 8 GATED: 22 tests (8 unit + 14
+  gate), 46 workspace suites green.
 
 - 2026-09-21 Milestone 7 — Judgment/OpenJEV: `tachyon-judgment`
   (provider-neutral `JudgmentProvider`, boolean/choice/score items with

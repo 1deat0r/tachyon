@@ -1,0 +1,23 @@
+[package]
+name = "tachyon-mutation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+blake3 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tachyon-ir = { workspace = true }
+tachyon-policy = { version = "0.0.1", path = "../tachyon-policy" }
+tachyon-tools = { version = "0.0.1", path = "../tachyon-tools" }
+tachyon-types = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tachyon-retrieval = { version = "0.0.1", path = "../tachyon-retrieval" }
+
+[lints]
+workspace = true

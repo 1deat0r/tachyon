@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Milestone 8: mutation engine (hash-guarded patch specs, durable
+  batch journal, preimage retention, per-file atomic commits,
+  finish-or-compensate recovery, changed-file events) with Slice C
+  fixing the incorrect implementation end to end.
+
 - Milestone 7: judgment layer (provider-neutral boolean/choice/score
   batches, certainty policies, outage fallback, fake provider,
   feature-gated OpenJEV adapter, opt-in router bridge) with a synthetic

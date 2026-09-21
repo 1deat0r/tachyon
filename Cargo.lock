@@ -1693,6 +1693,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "tachyon-mutation"
+version = "0.0.1"
+dependencies = [
+ "blake3",
+ "serde",
+ "serde_json",
+ "tachyon-ir",
+ "tachyon-policy",
+ "tachyon-retrieval",
+ "tachyon-tools",
+ "tachyon-types",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "tachyon-policy"
 version = "0.0.1"
 dependencies = [
