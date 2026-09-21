@@ -154,11 +154,12 @@ fn lexical_search_structured() {
 fn watcher_reports_changes() {
     let root = fixture("watcher");
     let watcher = Watcher::watch(&root).unwrap();
-    // Let the watcher settle, then touch a file.
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    // Let the watcher settle (FSEvent on macOS runners needs longer),
+    // then touch a file.
+    std::thread::sleep(std::time::Duration::from_secs(1));
     std::fs::write(root.join("src/login.ts"), "// touched\n").unwrap();
     let mut seen = Vec::new();
-    for _ in 0..40 {
+    for _ in 0..150 {
         std::thread::sleep(std::time::Duration::from_millis(100));
         seen.extend(watcher.pending());
         if seen.iter().any(|rel| rel == "src/login.ts") {
