@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Milestone 5: predictive router (deterministic classification, EWMA
+  estimates, 75 ms evidence grace window, serial mode) and route telemetry.
 - Milestone 4: repository intelligence (BLAKE3 inventory, heuristic
   symbol/reference index, lexical search, watcher invalidation) with
   Vertical Slice A answered zero-LLM.
