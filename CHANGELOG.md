@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Milestone 4: repository intelligence (BLAKE3 inventory, heuristic
+  symbol/reference index, lexical search, watcher invalidation) with
+  Vertical Slice A answered zero-LLM.
 - Milestone 3: capability policy (scope globs, trusted defaults,
   hash-bound approvals, path containment) and native tools (contained fs,
   process runner, read-only git, artifact spool, credential broker).

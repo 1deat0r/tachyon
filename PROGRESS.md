@@ -4,9 +4,18 @@ This file is updated by the implementing agent after every milestone.
 
 ## Current milestone
 
-Milestone 4 — Repository intelligence (Milestone 3 complete, see gates below)
+Milestone 5 — Predictive router (Milestone 4 complete, see gates below)
 
 ## Completed gates
+
+- 2026-09-21 Milestone 4 — Repository intelligence: `tachyon-repo`
+  (walkdir inventory with BLAKE3 identity + prune rules, heuristic
+  `LanguageBackend` for Rust/Python/TS/JS symbols, word-boundary reference
+  index, deterministic lexical search, notify watcher as invalidation hints,
+  hash-authoritative verify/refresh with generations). Vertical Slice A
+  ("where is refreshToken defined and used?") answered with zero LLM calls
+  in structured locations. Gate: 7 repo-gate tests green, full workspace
+  gate green.
 
 - 2026-09-21 Milestone 3 — Policy + native tools: `tachyon-policy`
   (capability/scope globs, trusted-workspace defaults, denials-first

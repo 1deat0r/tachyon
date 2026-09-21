@@ -5,5 +5,14 @@ edition.workspace = true
 rust-version.workspace = true
 publish = false
 
+[dependencies]
+blake3 = { workspace = true }
+notify = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tachyon-types = { workspace = true }
+thiserror = { workspace = true }
+walkdir = { workspace = true }
+
 [lints]
 workspace = true
