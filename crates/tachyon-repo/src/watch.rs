@@ -32,6 +32,9 @@ impl Watcher {
     /// Starts watching `root` recursively. Events are debounced 100 ms and
     /// delivered as batches of absolute paths.
     pub fn watch(root: &Path) -> Result<Self, WatchError> {
+        // Canonicalize: event paths arrive resolved (macOS TMPDIR is a
+        // symlink), so prefix-stripping must use the resolved root.
+        let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
         if !root.is_dir() {
             return Err(WatchError::MissingTarget(root.display().to_string()));
         }
@@ -49,7 +52,7 @@ impl Watcher {
         )
         .map_err(|error| WatchError::Backend(error.to_string()))?;
         watcher
-            .watch(root, notify::RecursiveMode::Recursive)
+            .watch(&root, notify::RecursiveMode::Recursive)
             .map_err(|error| WatchError::Backend(error.to_string()))?;
         // Debounce thread: batches events separated by quiet windows.
         std::thread::spawn(move || {
@@ -74,7 +77,7 @@ impl Watcher {
             }
         });
         Ok(Self {
-            root: root.to_path_buf(),
+            root,
             receiver: Some(batch_rx),
             _backend: Some(watcher),
         })
