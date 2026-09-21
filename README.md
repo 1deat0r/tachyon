@@ -1,5 +1,7 @@
 # Tachyon
 
+![CI](https://github.com/1deat0r/tachyon/actions/workflows/ci.yml/badge.svg)
+
 A high-performance AI agent harness. Routine work runs through deterministic
 code, repository indexes, and bounded judgment — LLM reasoning pays only for
 genuine unresolved uncertainty.
