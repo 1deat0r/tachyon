@@ -4,9 +4,39 @@ This file is updated by the implementing agent after every milestone.
 
 ## Current milestone
 
-Milestone 6 — Model layer (Milestone 5 complete, see gates below)
+Milestone 7 — Judgment/OpenJEV (Milestone 6 complete, see gates below)
 
 ## Completed gates
+
+- 2026-09-21 Milestone 6 — Model layer: `tachyon-retrieval`
+  (evidence structures with provenance, deterministic merge/rank),
+  `tachyon-models` (provider-neutral `ModelProvider`, capability
+  negotiation, role mapping, trusted context assembly with
+  `WorkspaceData`-never-authority, structured `AgentDecision` with
+  boundary repair, streaming event sink, `FakeModelProvider`,
+  OpenAI-compatible HTTP adapter for local inference, plain-`http`
+  only). Vertical Slice B ("Explain why these two implementations
+  behave differently") answered in one reasoning call over repo
+  evidence, citing both provenances. Gate: 34 models tests (29 unit +
+  5 gate incl. Slice B) + 7 retrieval tests green; `fmt`, `check`,
+  `clippy -D warnings` clean. R1 board (1 BUILD / 4 HOLD) adjudicated:
+  auth-key flag dismissed as display-redaction phantom (byte-verified
+  `{key}` interpolation, `grep -c` = 1); real findings fixed —
+  converging marker-aware budget fitter, pinned-never-dropped, newest
+  history survives, fail-closed trust, provenance-aware merge, NaN-safe
+  ranking, `ContextOverflow` taxonomy, usage accounting, `Retry-After`
+  support, CRLF rejection, role-carrying selection with request
+  constructor. R2 verify-by-quote: 2 BUILD (spec, adversarial) / 3 HOLD.
+  Real hang confirmed by 2 seats (fitter spun at marker floor when
+  allowance saturated to 0 with non-empty pinned content) — fixed by
+  making `truncate_block_chars` return `false` at identical-content
+  floor plus `output_exceeding_total_terminates_with_pinned` regression
+  test. API-seat auth HOLD dismissed: self-refuting (it reports 40/40
+  green including the header-carries-key test, which can only pass if
+  the key hits the wire) plus independent `od` verification. R2: 2
+  BUILD / 3 HOLD; hang fix + regression test landed. R3 unanimous
+  BUILD: all 3 HOLD seats flipped with quotes + live runs (API seat
+  confirmed the `***` was display redaction via `od` comparison).
 
 - 2026-09-21 Milestone 5 — Predictive router: `tachyon-router`
   (deterministic rule classification DirectNative/EvidenceFirst/

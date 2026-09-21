@@ -5,5 +5,14 @@ edition.workspace = true
 rust-version.workspace = true
 publish = false
 
+[dependencies]
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tachyon-retrieval = { version = "0.0.1", path = "../tachyon-retrieval" }
+tachyon-types = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+
 [lints]
 workspace = true

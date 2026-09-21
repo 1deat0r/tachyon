@@ -1670,6 +1670,15 @@ version = "0.0.1"
 [[package]]
 name = "tachyon-models"
 version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tachyon-retrieval",
+ "tachyon-types",
+ "thiserror",
+ "tokio",
+]
 
 [[package]]
 name = "tachyon-policy"
@@ -1708,6 +1717,11 @@ dependencies = [
 [[package]]
 name = "tachyon-retrieval"
 version = "0.0.1"
+dependencies = [
+ "serde",
+ "tachyon-types",
+ "uuid",
+]
 
 [[package]]
 name = "tachyon-router"

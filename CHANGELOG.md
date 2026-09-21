@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Milestone 6: model layer (provider-neutral requests/decisions,
+  capability negotiation, role mapping, trusted context assembly,
+  fake provider, OpenAI-compatible local adapter) and evidence
+  structures with deterministic merge; Vertical Slice B answered in
+  one reasoning call.
+
 - Milestone 5: predictive router (deterministic classification, EWMA
   estimates, 75 ms evidence grace window, serial mode) and route telemetry.
 - Milestone 4: repository intelligence (BLAKE3 inventory, heuristic
