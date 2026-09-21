@@ -77,7 +77,7 @@ impl Watcher {
             }
         });
         Ok(Self {
-            root: root.to_path_buf(),
+            root,
             receiver: Some(batch_rx),
             _backend: Some(watcher),
         })
