@@ -4,9 +4,27 @@ This file is updated by the implementing agent after every milestone.
 
 ## Current milestone
 
-Milestone 7 — Judgment/OpenJEV (Milestone 6 complete, see gates below)
+Milestone 8 — Mutation engine (Milestone 7 complete, see gates below)
 
 ## Completed gates
+
+- 2026-09-21 Milestone 7 — Judgment/OpenJEV: `tachyon-judgment`
+  (provider-neutral `JudgmentProvider`, boolean/choice/score items with
+  per-item certainty policies, batched resolution, capability-routed
+  registry with outage fallback to evidence, `FakeJudgmentProvider`,
+  `OpenJEV` adapter behind the `openjev` feature over plain-HTTP JSON,
+  opt-in router bridge closing the M5 `JudgmentFirst` loop).
+  A/B gate (synthetic fakes): 20 ambiguous requests avoid 14 model
+  calls (6 vs 20) at equal 20/20 verified success. Default
+  `JudgmentFirst` still resolves to evidence — real-workload A/B lands
+  in M13/M14. Gate: 22 tests default (15 unit + 7 gate) + 30 with
+  `openjev`; `fmt`, `check`, `clippy -D warnings` clean both ways.
+  Review: R1 1 BUILD/4 HOLD (auth flags dismissed as redaction
+  phantoms, one retracted after TCP capture); fixes — fail-closed
+  certainty, OOB bounds, resolve fallback for all provider errors,
+  policy-threaded bridge, source factory, 408/timeout mapping, bounded
+  reads; R2 4 BUILD/1 HOLD (wire-confidence laundering); fix —
+  non-finite confidence rejected at parse; R3 unanimous BUILD.
 
 - 2026-09-21 Milestone 6 — Model layer: `tachyon-retrieval`
   (evidence structures with provenance, deterministic merge/rank),

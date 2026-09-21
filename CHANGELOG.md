@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Milestone 7: judgment layer (provider-neutral boolean/choice/score
+  batches, certainty policies, outage fallback, fake provider,
+  feature-gated OpenJEV adapter, opt-in router bridge) with a synthetic
+  A/B showing 14 avoided model calls at equal verified success.
+
 - Milestone 6: model layer (provider-neutral requests/decisions,
   capability negotiation, role mapping, trusted context assembly,
   fake provider, OpenAI-compatible local adapter) and evidence

@@ -1666,6 +1666,18 @@ dependencies = [
 [[package]]
 name = "tachyon-judgment"
 version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tachyon-models",
+ "tachyon-router",
+ "tachyon-telemetry",
+ "tachyon-types",
+ "thiserror",
+ "tokio",
+ "uuid",
+]
 
 [[package]]
 name = "tachyon-models"
