@@ -4,9 +4,46 @@ This file is updated by the implementing agent after every milestone.
 
 ## Current milestone
 
-Milestone 9 — Verification (Milestone 8 complete, see gates below)
+Milestone 10 — Full debugging task (Milestone 9 complete, see gates below)
 
 ## Completed gates
+
+- 2026-09-22 Milestone 9 — Verification-gated completion: `tachyon-verify`
+  (typed `AcceptanceContract` with legacy fail-closed recovery, authorized
+  source snapshots, Rust affected-first planning with reverse-dependent
+  closure, validated verification IR through the scheduler, policy-bound
+  `verify.command` on the resolved canonical cwd, fresh private evidence,
+  serialized reports never re-authorize) plus supervisor-owned durable
+  completion in `tachyon-core` (immutable baseline/contract binding,
+  hard-constraint executable bindings, atomic journal/status/snapshot
+  transitions, interruption without blind replay, post-report rehash) and
+  the `tachyon-tools` process-ownership prerequisite (owned process groups,
+  TERM grace then KILL, inherited-pipe deadlines, contained cwd, bound
+  approvals, redact-before-spool). Gate: model-proposed wrong patch fails
+  the real regression (`command exited Some(101)`) and refuses `Completed`;
+  the corrected patch passes, persists `Completed`, and recovers it.
+  Tests: 32 verifier (2 unit + 4 acceptance + 6 planner + 15 runner +
+  5 snapshot), core 4 unit + 6 integration, store 4, tools 29;
+  full workspace 53 suites green; `fmt`, `check`, `clippy -D warnings` clean.
+- 2026-09-22 R1 board (5 seats): all REVISE with executed proof — cwd
+  symlink alias bypassing the `verify.command` denial, cross-run workspace
+  write-claim overlap via independent schedulers, scheduler-timeout grant
+  release before worker cleanup, snapshot cadence reset across recovery,
+  root metadata read without authorization, affected selection missing
+  reverse dependents. Adjudication: all accepted as real. Fixes: canonical
+  cwd resolution before authorization with invocation+resolved-scope approval
+  binding and same-target execution; process-wide per-workspace async lease
+  held through scheduler shutdown and worker drain; `snapshot_base`
+  threaded separately from replayed journal position; root `fs.metadata`
+  authorization before `is_dir`; reverse-dependency closure with
+  conservative workspace broadening. 6 new regression tests.
+  R2 verify-by-quote dispatched on the fixed tree.
+- 2026-09-22 R2 board (5 seats): unanimous BUILD — each fix verified by
+  quoted source plus executed regression and a novel scratch probe
+  (nested alias chain, aliased-spelling lease contention, double recovery
+  cadence, broad metadata/list denials, transitive a<-b<-c closure and
+  dependency cycles); M9 wrong-patch/correct-patch gate re-confirmed
+  6/6. Milestone 9 GATED.
 
 - 2026-09-21 Milestone 8 — Mutation engine: `tachyon-mutation`
   (PatchSpec + base-hash guard, fsync'd batch journal with torn-tail

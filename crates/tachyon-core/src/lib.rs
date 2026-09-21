@@ -6,13 +6,14 @@
 //! snapshots let a restarted process rebuild state from snapshot plus
 //! journal tail (spec §18, §41).
 //!
-//! Milestone 1 scope: task lifecycle (create, message, constraint, pause,
-//! resume, cancel), persistence coordination, crash recovery. Scheduling
-//! (`Executing`), routing, models, and verification arrive later and will
-//! own their own transitions; `Resume` returns a task to `Created` until
-//! the Milestone 2 scheduler exists.
+//! Lifecycle and M9 verification are supervisor-owned. M10 joins the
+//! investigation/model/mutation graph to this same completion boundary.
 
 #![warn(unsafe_code)]
+
+mod verification;
+pub use tachyon_verify::AcceptanceContract;
+pub use verification::VerificationState;
 
 use std::str::FromStr;
 use std::sync::Arc;
@@ -20,7 +21,9 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tachyon_ir::ExecutionGraph;
 use tachyon_store::{JournalEvent, StoreWriter, TaskRow};
+use tachyon_tools::ToolsContext;
 use tachyon_types::{ApprovalId, SessionId, TaskId, Timestamp, WorkspaceId};
+use tachyon_verify::{VerificationReport, VerificationRisk, VerifyError, WorkspaceSnapshot};
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
@@ -58,6 +61,11 @@ pub enum CoreError {
     /// Supervisor task ended before answering.
     #[error("supervisor gone")]
     SupervisorGone,
+    /// Required verification is absent, failed, stale, or unresolved.
+    #[error("completion blocked: {0}")]
+    VerificationBlocked(String),
+    #[error("verification: {0}")]
+    Verification(#[from] VerifyError),
     /// Stored state does not parse.
     #[error("corrupt task state: {detail}")]
     Corrupt {
@@ -214,14 +222,6 @@ pub struct OpenQuestion {
     pub text: String,
 }
 
-/// Machine-checkable completion terms. Milestone 1 keeps clauses as opaque
-/// strings; Milestone 9 replaces them with typed clause kinds (spec §32).
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AcceptanceContract {
-    /// Required clauses in plain text.
-    pub clauses: Vec<String>,
-}
-
 /// Canonical task state: the supervisor is its only logical writer (spec §3).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskState {
@@ -245,6 +245,9 @@ pub struct TaskState {
     pub open_questions: Vec<OpenQuestion>,
     /// Completion terms.
     pub acceptance: AcceptanceContract,
+    /// Baseline and latest executable evidence; absent on legacy tasks.
+    #[serde(default)]
+    pub verification: Option<VerificationState>,
     /// Validated execution graph (empty until Milestone 2 plans).
     pub graph: ExecutionGraph,
     /// Lifecycle status.
@@ -278,6 +281,20 @@ enum StateEvent {
         granted: bool,
         reason: String,
     },
+    VerificationConfigured {
+        contract: AcceptanceContract,
+        baseline: WorkspaceSnapshot,
+        risk: VerificationRisk,
+    },
+    VerificationStarted {
+        graph: ExecutionGraph,
+    },
+    VerificationFinished {
+        report: Option<VerificationReport>,
+        error: Option<String>,
+        completed: bool,
+    },
+    VerificationInterrupted,
 }
 
 /// Commands the supervisor owns (spec §15). Node/provider events arrive
@@ -308,6 +325,16 @@ enum SupervisorCommand {
         reply: oneshot::Sender<Result<TaskState, CoreError>>,
     },
     GetState {
+        reply: oneshot::Sender<Result<TaskState, CoreError>>,
+    },
+    ConfigureVerification {
+        context: Arc<ToolsContext>,
+        contract: AcceptanceContract,
+        risk: VerificationRisk,
+        reply: oneshot::Sender<Result<TaskState, CoreError>>,
+    },
+    VerifyAndComplete {
+        context: Arc<ToolsContext>,
         reply: oneshot::Sender<Result<TaskState, CoreError>>,
     },
 }
@@ -428,6 +455,7 @@ pub async fn create_task(
         open_questions: Vec::new(),
         acceptance: AcceptanceContract::default(),
         graph: ExecutionGraph::empty(task_id, 0),
+        verification: None,
         status: TaskStatus::Created,
         created_at: now,
         updated_at: now,
@@ -453,7 +481,7 @@ pub async fn create_task(
             &created,
         )
         .await?;
-    Ok(spawn(state, 0, store))
+    Ok(spawn(state, 0, Some(0), store))
 }
 
 /// Rebuilds a supervisor for an existing task: loads the snapshot, replays
@@ -467,22 +495,32 @@ pub async fn recover_task(
         .load_task(&task_id.to_string())
         .await?
         .ok_or(CoreError::UnknownTask(task_id))?;
-    let (mut state, covered) = starting_state(&row)?;
-    state.status = TaskStatus::Recovering;
+    let (mut state, mut covered) = starting_state(&row)?;
+
     for event in store
         .load_events_since(&task_id.to_string(), covered)
         .await?
     {
         apply_journal(&mut state, &event)?;
+        covered = event.seq;
     }
-    let restored = TaskStatus::from_str(&row.status)?;
-    state.status = restored;
+    // The journal tail, not stale task-row metadata, is recovery truth.
     state.updated_at = Timestamp::now();
-    Ok(spawn(
+    let interrupted = state.verification.as_ref().is_some_and(|v| v.in_progress);
+    let snapshot_base = row.snapshot_seq;
+    let mut app = Loop::new(
         state,
         row.snapshot_seq.unwrap_or(-1).max(covered),
-        store,
-    ))
+        snapshot_base,
+        store.clone(),
+    );
+    if interrupted {
+        // Commands can have unknown effects; never silently replay after crash.
+        app.transition_journalled(StateEvent::VerificationInterrupted)
+            .await?;
+    }
+    let snapshot_base = app.snapshot_base;
+    Ok(spawn(app.state, app.covered, snapshot_base, store))
 }
 
 /// Snapshot state plus the sequence it covers.
@@ -506,6 +544,7 @@ fn starting_state(row: &TaskRow) -> Result<(TaskState, i64), CoreError> {
         open_questions: Vec::new(),
         acceptance: AcceptanceContract::default(),
         graph: ExecutionGraph::empty(id, 0),
+        verification: None,
         status: TaskStatus::from_str(&row.status)?,
         created_at: Timestamp::from_micros(row.created_at),
         updated_at: Timestamp::from_micros(row.updated_at),
@@ -543,25 +582,81 @@ fn apply_journal(state: &mut TaskState, event: &JournalEvent) -> Result<(), Core
         }
         StateEvent::Message { .. } => {
             state.revision += 1;
+            if let Some(v) = &mut state.verification {
+                v.report = None;
+            }
         }
         StateEvent::Constraint { constraint } => {
             state.constraints.push(constraint);
             state.revision += 1;
+            if let Some(v) = &mut state.verification {
+                v.report = None;
+            }
         }
         StateEvent::Status { to, .. } => {
             state.status = to;
         }
         StateEvent::Approval { .. } => {}
+        StateEvent::VerificationConfigured {
+            contract,
+            baseline,
+            risk,
+        } => {
+            state.acceptance = contract;
+            state.verification = Some(VerificationState::new(baseline, risk));
+            state.revision += 1;
+        }
+        StateEvent::VerificationStarted { graph } => {
+            state.graph = graph;
+            state.status = TaskStatus::Verifying;
+            if let Some(v) = &mut state.verification {
+                v.in_progress = true;
+                v.report = None;
+                v.error = None;
+            }
+        }
+        StateEvent::VerificationFinished {
+            report,
+            error,
+            completed,
+        } => {
+            if let Some(v) = &mut state.verification {
+                v.in_progress = false;
+                v.report = report;
+                v.error = error;
+            }
+            state.status = if completed {
+                TaskStatus::Completed
+            } else {
+                TaskStatus::Executing
+            };
+        }
+        StateEvent::VerificationInterrupted => {
+            if let Some(v) = &mut state.verification {
+                v.in_progress = false;
+                v.interrupted = true;
+                v.report = None;
+                v.error = Some("interrupted verifier; effects require reconciliation".into());
+            }
+            state.status = TaskStatus::Recovering;
+        }
     }
     Ok(())
 }
 
 /// Starts the supervisor loop for `state`, which already covers journal
-/// sequence `covered`.
-fn spawn(state: TaskState, covered: i64, store: Arc<StoreWriter>) -> SupervisorHandle {
+/// sequence `covered`. `snapshot_base` is the sequence the last durable
+/// snapshot covers; it must survive recovery so the 100-event cadence is
+/// measured since the last snapshot, not since the last restart.
+fn spawn(
+    state: TaskState,
+    covered: i64,
+    snapshot_base: Option<i64>,
+    store: Arc<StoreWriter>,
+) -> SupervisorHandle {
     let task_id = state.id;
     let (tx, rx) = mpsc::channel(SUPERVISOR_MAILBOX);
-    tokio::spawn(run_loop(state, covered, store, rx));
+    tokio::spawn(run_loop(state, covered, snapshot_base, store, rx));
     SupervisorHandle { task_id, tx }
 }
 
@@ -570,24 +665,35 @@ struct Loop {
     covered: i64,
     snapshot_base: Option<i64>,
     store: Arc<StoreWriter>,
+    jobs: tokio::task::JoinSet<Result<VerificationReport, VerifyError>>,
+    active: Option<verification::ActiveVerification>,
 }
 
 async fn run_loop(
     state: TaskState,
     covered: i64,
+    snapshot_base: Option<i64>,
     store: Arc<StoreWriter>,
     mut rx: mpsc::Receiver<SupervisorCommand>,
 ) {
-    let mut app = Loop {
-        state,
-        covered,
-        snapshot_base: Some(covered),
-        store,
-    };
+    let mut app = Loop::new(state, covered, snapshot_base, store);
     // The loop lives until every handle is dropped, so terminal tasks keep
     // answering reads and rejecting mutations with IllegalTransition.
-    while let Some(command) = rx.recv().await {
-        app.handle(command).await;
+    loop {
+        tokio::select! {
+            biased;
+            command = rx.recv() => {
+                if let Some(command) = command {
+                    app.handle(command).await;
+                } else {
+                    let _ = app.stop_verification().await;
+                    break;
+                }
+            },
+            joined = app.jobs.join_next(), if !app.jobs.is_empty() => {
+                if let Some(joined) = joined { app.finish_verification(joined).await; }
+            }
+        }
     }
 }
 
@@ -599,19 +705,55 @@ fn event_kind(event: &StateEvent) -> &'static str {
         StateEvent::Constraint { .. } => "constraint",
         StateEvent::Status { .. } => "status",
         StateEvent::Approval { .. } => "approval",
+        StateEvent::VerificationConfigured { .. } => "verification_configured",
+        StateEvent::VerificationStarted { .. } => "verification_started",
+        StateEvent::VerificationFinished { .. } => "verification_finished",
+        StateEvent::VerificationInterrupted => "verification_interrupted",
     }
 }
 
 impl Loop {
+    fn new(
+        state: TaskState,
+        covered: i64,
+        snapshot_base: Option<i64>,
+        store: Arc<StoreWriter>,
+    ) -> Self {
+        Self {
+            state,
+            covered,
+            snapshot_base,
+            store,
+            jobs: tokio::task::JoinSet::new(),
+            active: None,
+        }
+    }
+
     async fn handle(&mut self, command: SupervisorCommand) {
         match command {
+            SupervisorCommand::ConfigureVerification {
+                context,
+                contract,
+                risk,
+                reply,
+            } => {
+                let outcome = self.configure_verification(context, contract, risk).await;
+                let _ = reply.send(outcome);
+            }
+            SupervisorCommand::VerifyAndComplete { context, reply } => {
+                self.start_verification(context, reply).await;
+            }
             SupervisorCommand::GetState { reply } => {
                 let _ = reply.send(Ok(self.state.clone()));
             }
             SupervisorCommand::AddUserMessage { message, reply } => {
-                let outcome = self
-                    .transition_journalled(StateEvent::Message { message })
-                    .await;
+                let outcome = match self.stop_verification().await {
+                    Ok(()) => {
+                        self.transition_journalled(StateEvent::Message { message })
+                            .await
+                    }
+                    Err(error) => Err(error),
+                };
                 let _ = reply.send(outcome);
             }
             SupervisorCommand::AddConstraint {
@@ -626,13 +768,20 @@ impl Loop {
                     strength,
                     created_revision: self.state.revision + 1,
                 };
-                let outcome = self
-                    .transition_journalled(StateEvent::Constraint { constraint })
-                    .await;
+                let outcome = match self.stop_verification().await {
+                    Ok(()) => {
+                        self.transition_journalled(StateEvent::Constraint { constraint })
+                            .await
+                    }
+                    Err(error) => Err(error),
+                };
                 let _ = reply.send(outcome);
             }
             SupervisorCommand::Pause { reply } => {
-                let outcome = self.move_to(TaskStatus::Paused).await;
+                let outcome = match self.stop_verification().await {
+                    Ok(()) => self.move_to(TaskStatus::Paused).await,
+                    Err(error) => Err(error),
+                };
                 let _ = reply.send(outcome);
             }
             SupervisorCommand::Resume { reply } => {
@@ -640,7 +789,10 @@ impl Loop {
                 let _ = reply.send(outcome);
             }
             SupervisorCommand::Cancel { reply } => {
-                let outcome = self.move_to(TaskStatus::Cancelled).await;
+                let outcome = match self.stop_verification().await {
+                    Ok(()) => self.move_to(TaskStatus::Cancelled).await,
+                    Err(error) => Err(error),
+                };
                 let _ = reply.send(outcome);
             }
             SupervisorCommand::DecideApproval {
@@ -677,35 +829,41 @@ impl Loop {
             });
         }
         let payload = serde_json::to_string(&event)?;
-        let seq = self
-            .store
-            .append_event(&self.state.id.to_string(), event_kind(&event), &payload)
-            .await?;
         let mut next = self.state.clone();
         apply_journal(
             &mut next,
             &JournalEvent {
-                seq,
+                seq: self.covered + 1,
                 event_id: String::new(),
                 schema_version: 1,
                 kind: event_kind(&event).to_owned(),
-                payload,
+                payload: payload.clone(),
                 created_at: Timestamp::now().as_micros(),
             },
         )?;
         next.updated_at = Timestamp::now();
         let base = self.snapshot_base.unwrap_or(self.covered);
+        let snapshot =
+            if self.covered + 1 - base >= SNAPSHOT_EVERY_EVENTS || next.status.is_terminal() {
+                Some(serde_json::to_string(&next)?)
+            } else {
+                None
+            };
+        let seq = self
+            .store
+            .append_transition(
+                &next.id.to_string(),
+                event_kind(&event),
+                &payload,
+                tachyon_store::TransitionState {
+                    status: next.status.name(),
+                    revision: i64::try_from(next.revision).unwrap_or(i64::MAX),
+                    snapshot_json: snapshot.as_deref(),
+                },
+            )
+            .await?;
         self.covered = seq;
-        if seq - base >= SNAPSHOT_EVERY_EVENTS || next.status.is_terminal() {
-            self.store
-                .save_snapshot(
-                    &next.id.to_string(),
-                    seq,
-                    &serde_json::to_string(&next)?,
-                    next.status.name(),
-                    i64::try_from(next.revision).unwrap_or(i64::MAX),
-                )
-                .await?;
+        if snapshot.is_some() {
             self.snapshot_base = Some(seq);
         }
         self.state = next;
@@ -713,6 +871,11 @@ impl Loop {
     }
 
     async fn move_to(&mut self, to: TaskStatus) -> Result<TaskState, CoreError> {
+        if to == TaskStatus::Completed {
+            return Err(CoreError::VerificationBlocked(
+                "only executable acceptance may complete a task".into(),
+            ));
+        }
         let from = self.state.status;
         if from.is_terminal() {
             return Err(CoreError::IllegalTransition { from, to });
@@ -849,6 +1012,48 @@ mod tests {
             .unwrap();
         assert!(row.snapshot_seq.unwrap_or(-1) >= 100);
         drop(handle);
+        store.close().await;
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn snapshot_cadence_survives_recovery() {
+        let (store, dir) = open_test_store().await;
+        let session = SessionId::generate();
+        store.create_session(&session.to_string()).await.unwrap();
+        let handle = create_task(
+            session,
+            WorkspaceId::generate(),
+            "cadence".to_owned(),
+            store.clone(),
+        )
+        .await
+        .unwrap();
+        let task_id = handle.task_id();
+        for index in 0..99 {
+            handle.add_message(format!("note {index}")).await.unwrap();
+        }
+        let row = store
+            .load_task(&task_id.to_string())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.snapshot_seq, Some(0));
+        drop(handle);
+        // Restart must not reset the cadence to the journal tail: the 100th
+        // transition since snapshot 0 still snapshots.
+        let recovered = recover_task(task_id, store.clone()).await.unwrap();
+        recovered
+            .add_message("across restart".to_owned())
+            .await
+            .unwrap();
+        let row = store
+            .load_task(&task_id.to_string())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.snapshot_seq, Some(100));
+        drop(recovered);
         store.close().await;
         std::fs::remove_dir_all(&dir).unwrap();
     }

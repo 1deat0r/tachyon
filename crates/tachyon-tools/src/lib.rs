@@ -35,6 +35,8 @@ pub enum ToolError {
     Containment(#[from] tachyon_policy::ContainmentError),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+    #[error("process cancelled")]
+    ProcessCancelled,
     #[error("process timed out after {0:?}")]
     ProcessTimeout(std::time::Duration),
     #[error("process exited with {0}")]

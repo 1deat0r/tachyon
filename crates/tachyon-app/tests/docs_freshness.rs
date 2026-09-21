@@ -80,6 +80,7 @@ const IMPLEMENTED: &[&str] = &[
     "tachyon-models",
     "tachyon-judgment",
     "tachyon-mutation",
+    "tachyon-verify",
 ];
 
 #[test]

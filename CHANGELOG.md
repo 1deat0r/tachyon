@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Milestone 9: verification-gated completion (typed acceptance contracts,
+  authorized source snapshots, affected-first Rust planning with
+  reverse-dependent closure, validated verification IR through the
+  scheduler, policy-bound commands on the resolved canonical cwd,
+  process-wide per-workspace execution lease, supervisor-owned durable
+  completion with atomic journal projection) with the wrong-patch/fixed-patch
+  gate end to end.
+
 - Milestone 8: mutation engine (hash-guarded patch specs, durable
   batch journal, preimage retention, per-file atomic commits,
   finish-or-compensate recovery, changed-file events) with Slice C

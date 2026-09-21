@@ -1628,10 +1628,16 @@ dependencies = [
  "serde",
  "serde_json",
  "tachyon-ir",
+ "tachyon-models",
+ "tachyon-mutation",
+ "tachyon-policy",
  "tachyon-store",
+ "tachyon-tools",
  "tachyon-types",
+ "tachyon-verify",
  "thiserror",
  "tokio",
+ "tokio-util",
  "tracing",
  "uuid",
 ]
@@ -1805,12 +1811,14 @@ name = "tachyon-tools"
 version = "0.0.1"
 dependencies = [
  "blake3",
+ "libc",
  "serde",
  "serde_json",
  "tachyon-policy",
  "tachyon-types",
  "thiserror",
  "tokio",
+ "tokio-util",
  "walkdir",
  "zstd",
 ]
@@ -1831,6 +1839,21 @@ dependencies = [
 [[package]]
 name = "tachyon-verify"
 version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "blake3",
+ "serde",
+ "serde_json",
+ "tachyon-ir",
+ "tachyon-policy",
+ "tachyon-scheduler",
+ "tachyon-tools",
+ "tachyon-types",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "uuid",
+]
 
 [[package]]
 name = "tempfile"

@@ -104,6 +104,13 @@ pub struct TaskSummary {
     pub updated_at: i64,
 }
 
+/// Materialized task metadata committed atomically with a journal event.
+pub struct TransitionState<'a> {
+    pub status: &'a str,
+    pub revision: i64,
+    pub snapshot_json: Option<&'a str>,
+}
+
 /// The single logical writer of correctness-critical state.
 pub struct StoreWriter {
     pool: sqlx::SqlitePool,
@@ -198,6 +205,28 @@ impl StoreWriter {
         kind: &str,
         payload: &str,
     ) -> Result<i64, StoreError> {
+        self.append(task_id, kind, payload, None).await
+    }
+
+    /// Journal and projected status/revision/snapshot share one SQLite commit.
+    /// A crash cannot leave a terminal task row without its acceptance event.
+    pub async fn append_transition(
+        &self,
+        task_id: &str,
+        kind: &str,
+        payload: &str,
+        state: TransitionState<'_>,
+    ) -> Result<i64, StoreError> {
+        self.append(task_id, kind, payload, Some(state)).await
+    }
+
+    async fn append(
+        &self,
+        task_id: &str,
+        kind: &str,
+        payload: &str,
+        state: Option<TransitionState<'_>>,
+    ) -> Result<i64, StoreError> {
         let _guard = self.write.lock().await;
         let mut tx = self.pool.begin().await?;
         let next: Option<i64> =
@@ -225,6 +254,21 @@ impl StoreWriter {
             .bind(task_id)
             .execute(&mut *tx)
             .await?;
+        if let Some(state) = state {
+            sqlx::query(
+                "UPDATE tasks SET status = ?, revision = ?,
+                 snapshot_seq = CASE WHEN ? IS NULL THEN snapshot_seq ELSE ? END,
+                 snapshot_json = COALESCE(?, snapshot_json) WHERE id = ?",
+            )
+            .bind(state.status)
+            .bind(state.revision)
+            .bind(state.snapshot_json)
+            .bind(seq)
+            .bind(state.snapshot_json)
+            .bind(task_id)
+            .execute(&mut *tx)
+            .await?;
+        }
         tx.commit().await?;
         Ok(seq)
     }
@@ -431,5 +475,72 @@ mod tests {
         assert!(store.incomplete_tasks().await.unwrap().is_empty());
         store.close().await;
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn journal_and_completion_projection_commit_together() {
+        let (store, dir) = open_test_store().await;
+        store.create_session("s").await.unwrap();
+        store
+            .create_task("t", "s", "w", "obj", "Created", "{}", "{}")
+            .await
+            .unwrap();
+        let seq = store
+            .append_transition(
+                "t",
+                "verification_finished",
+                "{}",
+                super::TransitionState {
+                    status: "Completed",
+                    revision: 3,
+                    snapshot_json: Some("{\"verified\":true}"),
+                },
+            )
+            .await
+            .unwrap();
+        let row = store.load_task("t").await.unwrap().unwrap();
+        assert_eq!(row.status, "Completed");
+        assert_eq!(row.revision, 3);
+        assert_eq!(row.snapshot_seq, Some(seq));
+        assert_eq!(row.snapshot_json.as_deref(), Some("{\"verified\":true}"));
+        assert_eq!(store.load_events_since("t", 0).await.unwrap().len(), 1);
+        assert!(store.incomplete_tasks().await.unwrap().is_empty());
+        store.close().await;
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn projection_failure_rolls_back_the_acceptance_event() {
+        let (store, dir) = open_test_store().await;
+        store.create_session("s").await.unwrap();
+        store
+            .create_task("t", "s", "w", "obj", "Created", "{}", "{}")
+            .await
+            .unwrap();
+        sqlx::query("CREATE TRIGGER fault_projection BEFORE UPDATE OF status ON tasks BEGIN SELECT RAISE(ABORT, 'injected projection failure'); END")
+            .execute(&store.pool).await.unwrap();
+        assert!(
+            store
+                .append_transition(
+                    "t",
+                    "verification_finished",
+                    "{}",
+                    super::TransitionState {
+                        status: "Completed",
+                        revision: 1,
+                        snapshot_json: Some("{\"verified\":true}"),
+                    }
+                )
+                .await
+                .is_err()
+        );
+        let row = store.load_task("t").await.unwrap().unwrap();
+        assert_eq!(row.status, "Created");
+        assert_eq!(row.revision, 0);
+        assert_eq!(row.snapshot_seq, Some(0));
+        assert!(store.load_events_since("t", 0).await.unwrap().is_empty());
+        assert_eq!(store.incomplete_tasks().await.unwrap(), vec!["t"]);
+        store.close().await;
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
