@@ -4,9 +4,18 @@ This file is updated by the implementing agent after every milestone.
 
 ## Current milestone
 
-Milestone 5 — Predictive router (Milestone 4 complete, see gates below)
+Milestone 6 — Model layer (Milestone 5 complete, see gates below)
 
 ## Completed gates
+
+- 2026-09-21 Milestone 5 — Predictive router: `tachyon-router`
+  (deterministic rule classification DirectNative/EvidenceFirst/
+  JudgmentFirst/ReasoningFirst/Hybrid, candidate extraction with stoplist,
+  EWMA-priced evidence plans, 75 ms grace window, serial mode,
+  JudgmentFirst resolving to evidence until M7), `tachyon-telemetry`
+  (bounded recorder, EWMA, route audit records). Gate: simple
+  repo/search/git routes plan zero model calls; complex routes still
+  launch evidence first; 7 router-gate + 2 telemetry tests green.
 
 - 2026-09-21 Milestone 4 — Repository intelligence: `tachyon-repo`
   (walkdir inventory with BLAKE3 identity + prune rules, heuristic

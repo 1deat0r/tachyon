@@ -1712,6 +1712,14 @@ version = "0.0.1"
 [[package]]
 name = "tachyon-router"
 version = "0.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tachyon-ir",
+ "tachyon-telemetry",
+ "tachyon-types",
+ "thiserror",
+]
 
 [[package]]
 name = "tachyon-scheduler"
@@ -1745,6 +1753,10 @@ dependencies = [
 [[package]]
 name = "tachyon-telemetry"
 version = "0.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "tachyon-tools"
