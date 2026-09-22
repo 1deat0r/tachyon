@@ -7,7 +7,7 @@ use std::{
 pub struct Workspace(pub PathBuf);
 impl Workspace {
     pub fn new() -> Self {
-        let path = std::env::temp_dir().join(format!("tachyon-verify-{}", uuid::Uuid::now_v7()));
+        let path = std::env::temp_dir().join(format!("tv-{}", uuid::Uuid::now_v7().simple()));
         fs::create_dir_all(&path).unwrap();
         Self(path)
     }

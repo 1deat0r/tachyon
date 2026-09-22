@@ -15,6 +15,23 @@ use tachyon_types::{SessionId, TaskId, WorkspaceId};
 use tachyon_verify::{AcceptanceContract, Clause, VerificationRisk};
 use tokio_util::sync::CancellationToken;
 
+/// Windows reap proof: the PID cannot be recycled while the leader is
+/// unreaped, and opening it fails once the process is gone.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn pid_dead(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    // SAFETY: read-only open of a live child PID; the handle is closed below.
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        return true;
+    }
+    // SAFETY: handle came from the successful OpenProcess above.
+    unsafe { CloseHandle(handle) };
+    false
+}
+
 struct Fixture {
     root: PathBuf,
     context: Arc<ToolsContext>,
@@ -250,7 +267,9 @@ async fn cancel_acknowledges_after_real_reap_while_the_mailbox_serves() {
         .await
         .unwrap()
         .unwrap();
-    let _pid: u32 = line.trim().parse().unwrap();
+    // Unix proves the reap by socket EOF above; the PID is the Windows proof.
+    #[cfg_attr(unix, allow(unused_variables))]
+    let child_pid: u32 = line.trim().parse().unwrap();
     // Portable child-liveness probe: the child never sends again, so a read
     // pends while it lives and resolves EOF once it is reaped. No /proc.
     let mut eof = Box::pin(async move {
@@ -295,9 +314,26 @@ async fn cancel_acknowledges_after_real_reap_while_the_mailbox_serves() {
         .await
         .expect("the cancel acknowledgement never arrived")
         .unwrap();
+    #[cfg(unix)]
     tokio::time::timeout(Duration::from_secs(10), eof)
         .await
         .expect("the child socket never closed: the acknowledgement preceded the actual reap");
+    #[cfg(windows)]
+    {
+        drop(eof);
+        // Windows process death reaches peers as RST, FIN, or (lingering
+        // inherited handles) nothing at all — socket closure is not a reap
+        // proof there. The PID itself is: it cannot be recycled while the
+        // leader is unreaped, and OpenProcess fails once it is gone.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while !pid_dead(child_pid) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the child PID survived termination: the acknowledgement preceded the actual reap"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
     let refused = pending.await.unwrap();
     assert_eq!(acked.status, TaskStatus::Cancelled);
     assert!(refused.is_err(), "pending work survived cancellation");

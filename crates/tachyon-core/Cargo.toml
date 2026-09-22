@@ -23,6 +23,11 @@ uuid = { workspace = true }
 tachyon-policy = { version = "0.0.1", path = "../tachyon-policy" }
 tachyon-mutation = { version = "0.0.1", path = "../tachyon-mutation" }
 tachyon-models = { version = "0.0.1", path = "../tachyon-models" }
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+] }
 
 [lints]
 workspace = true
