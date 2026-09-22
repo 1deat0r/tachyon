@@ -68,6 +68,11 @@ impl ToolsContext {
         policy: Policy,
         artifacts: artifact::ArtifactSpool,
     ) -> Self {
+        // Canonicalize once: scope resolution strips this prefix from
+        // canonical file paths, so a symlinked root (macOS /var → /private/var)
+        // would otherwise silently miss deny scopes. Best-effort — a root that
+        // does not exist yet stays as given until it does.
+        let workspace_root = std::fs::canonicalize(&workspace_root).unwrap_or(workspace_root);
         Self {
             workspace_root,
             policy,

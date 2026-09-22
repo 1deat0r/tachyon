@@ -259,6 +259,10 @@ async fn cancel_acknowledges_after_real_reap_while_the_mailbox_serves() {
             match stream.read(&mut byte).await {
                 Ok(0) => break,
                 Ok(_) => {}
+                // Windows reports a terminated peer as RST, not FIN: either
+                // proves the child is gone. A live child holds the socket
+                // open, so neither occurs before the reap.
+                Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => break,
                 Err(error) => panic!("liveness probe failed: {error}"),
             }
         }
