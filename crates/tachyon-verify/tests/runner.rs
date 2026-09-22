@@ -1,4 +1,22 @@
 #![cfg(unix)]
+/// Portable reap proof: `/proc` exists only on Linux; elsewhere signal 0
+/// reports ESRCH once the PID is reaped (0 while alive or zombie).
+#[allow(unsafe_code)]
+fn reaped(pid_text: &str) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        !std::path::Path::new(&format!("/proc/{pid_text}")).exists()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let pid: libc::pid_t = pid_text.trim().parse().expect("child pid");
+        // SAFETY: signal 0 performs existence check only, no delivery.
+        if unsafe { libc::kill(pid, 0) } == 0 {
+            return false;
+        }
+        std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    }
+}
 #[tokio::test]
 async fn underlying_process_policy_is_required_even_if_verification_is_allowed() {
     let ws = Workspace::new();
@@ -138,9 +156,8 @@ async fn aborting_the_run_leaves_no_unowned_process() {
     let pid = std::fs::read_to_string(ws.path().join("target/pid")).unwrap();
     handle.abort();
     assert!(handle.await.unwrap_err().is_cancelled());
-    #[cfg(target_os = "linux")]
     tokio::time::timeout(Duration::from_secs(2), async {
-        while std::path::Path::new(&format!("/proc/{pid}")).exists() {
+        while !reaped(&pid) {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
@@ -281,11 +298,7 @@ async fn cancellation_drains_the_owned_process_before_returning() {
         ws.path().join("target/terminated").exists(),
         "cancellable runner was dropped before its cleanup completed"
     );
-    #[cfg(target_os = "linux")]
-    assert!(
-        !std::path::Path::new(&format!("/proc/{pid}")).exists(),
-        "immediate child not reaped"
-    );
+    assert!(reaped(&pid), "immediate child not reaped");
 }
 
 #[tokio::test]
