@@ -133,22 +133,20 @@ async fn execute(
         return Err(ToolError::ProcessCancelled);
     }
     command.process_group(0).kill_on_drop(true);
-    let child = command.spawn()?;
+    let child = command.spawn().map_err(|error| stage_io("spawn", &error))?;
     let pid = child.id().expect("newly spawned child has a PID");
     let mut owned = OwnedChild {
         child,
         group: Some(i32::try_from(pid).expect("Unix PIDs fit pid_t")),
     };
-    let stdout = owned
-        .child
-        .stdout
-        .take()
-        .ok_or_else(|| std::io::Error::other("missing stdout pipe"))?;
-    let stderr = owned
-        .child
-        .stderr
-        .take()
-        .ok_or_else(|| std::io::Error::other("missing stderr pipe"))?;
+    let stdout =
+        owned.child.stdout.take().ok_or_else(|| {
+            stage_io("take-stdout", &std::io::Error::other("missing stdout pipe"))
+        })?;
+    let stderr =
+        owned.child.stderr.take().ok_or_else(|| {
+            stage_io("take-stderr", &std::io::Error::other("missing stderr pipe"))
+        })?;
     // These are scoped futures, not detached reader tasks. The deadline spans
     // both leader exit AND inherited pipes; all readers drop on every exit path.
     let result = tokio::select! {
@@ -161,18 +159,34 @@ async fn execute(
                 read_stream(stdout),
                 read_stream(stderr)
             )
-        } => output.map_err(ToolError::Io),
+        } => output.map_err(|error| stage_io("wait-or-read", &error)),
     };
     match result {
         Ok(((), stdout, stderr)) => {
-            let status = owned.kill_and_reap().await?;
+            let status = owned
+                .kill_and_reap()
+                .await
+                .map_err(|error| stage_io("kill-and-reap", &error))?;
             Ok((status, stdout, stderr))
         }
         Err(error) => {
-            owned.terminate().await?;
+            owned
+                .terminate()
+                .await
+                .map_err(|error| stage_io("terminate", &error))?;
             Err(error)
         }
     }
+}
+
+/// Labels an IO failure with the process-lifecycle stage that produced it,
+/// keeping the raw OS code in the message for platform diagnosis.
+#[cfg(unix)]
+fn stage_io(stage: &'static str, error: &std::io::Error) -> ToolError {
+    ToolError::Io(std::io::Error::new(
+        error.kind(),
+        format!("{stage} (os error {:?}): {error}", error.raw_os_error()),
+    ))
 }
 
 #[cfg(not(unix))]
