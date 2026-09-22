@@ -258,7 +258,7 @@ async fn cancel_acknowledges_after_real_reap_while_the_mailbox_serves() {
             args: vec![
                 "-NoProfile".into(),
                 "-Command".into(),
-                "$PID | Out-File -FilePath target/pid -NoNewline; Start-Sleep 60".into(),
+                "New-Item -ItemType Directory -Force target | Out-Null; [System.IO.File]::WriteAllText('target/pid', \"$PID\"); Start-Sleep 60".into(),
             ],
             cwd: ".".into(),
             env: BTreeMap::new(),
