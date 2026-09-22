@@ -213,19 +213,30 @@ async fn held_lease_stalls_planner_not_mailbox_or_steering() {
 
 #[tokio::test]
 async fn cancel_acknowledges_after_real_reap_while_the_mailbox_serves() {
+    #[cfg(unix)]
     use tokio::io::AsyncBufReadExt as _;
+    #[cfg(unix)]
     use tokio::io::AsyncReadExt as _;
     let mut f = Fixture::new().await;
     let mut policy = Policy::trusted_workspace();
     policy.allow("verify.command", "workspace/**");
+    // Unix: a python child with a loopback readiness handshake. Windows: a
+    // PowerShell sleeper publishing its PID to a file — python-on-Windows
+    // process/socket lifetime proved too flaky to observe a reap through.
+    #[cfg(unix)]
     policy.allow("process.spawn", "python3");
+    #[cfg(windows)]
+    policy.allow("process.spawn", "powershell");
     Arc::get_mut(&mut f.context).unwrap().policy = policy;
     // A loopback readiness handshake proves the real command is alive; no sleep
     // or marker polling. Dropping the stream unblocks it if the test fails.
+    #[cfg(unix)]
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await
         .unwrap();
+    #[cfg(unix)]
     let port = listener.local_addr().unwrap().port();
+    #[cfg(unix)]
     let command = tachyon_verify::CommandCheck {
         program: "python3".into(),
         args: vec![
@@ -240,6 +251,20 @@ async fn cancel_acknowledges_after_real_reap_while_the_mailbox_serves() {
         env: BTreeMap::new(),
         timeout_ms: 30_000,
     };
+    #[cfg(windows)]
+    let command = {
+        tachyon_verify::CommandCheck {
+            program: "powershell".into(),
+            args: vec![
+                "-NoProfile".into(),
+                "-Command".into(),
+                "$PID | Out-File -FilePath target/pid -NoNewline; Start-Sleep 60".into(),
+            ],
+            cwd: ".".into(),
+            env: BTreeMap::new(),
+            timeout_ms: 30_000,
+        }
+    };
     f.task
         .configure_verification(
             f.context.clone(),
@@ -252,41 +277,62 @@ async fn cancel_acknowledges_after_real_reap_while_the_mailbox_serves() {
         .unwrap();
     let handle = f.task.clone();
     let context = f.context.clone();
+    // `mut` serves the Unix readiness select below; Windows only polls it.
+    #[cfg_attr(windows, allow(unused_mut))]
     let mut pending = tokio::spawn(async move { handle.verify_and_complete(context).await });
-    let (stream, _) = tokio::time::timeout(Duration::from_secs(10), async {
-        tokio::select! {
-            result = &mut pending => panic!("verifier exited before readiness: {result:?}"),
-            accepted = listener.accept() => accepted.unwrap(),
-        }
-    })
-    .await
-    .unwrap();
-    let mut stream = tokio::io::BufReader::new(stream);
-    let mut line = String::new();
-    tokio::time::timeout(Duration::from_secs(5), stream.read_line(&mut line))
-        .await
-        .unwrap()
-        .unwrap();
-    // Unix proves the reap by socket EOF above; the PID is the Windows proof.
-    #[cfg_attr(unix, allow(unused_variables))]
-    let child_pid: u32 = line.trim().parse().unwrap();
-    // Portable child-liveness probe: the child never sends again, so a read
-    // pends while it lives and resolves EOF once it is reaped. No /proc.
-    let mut eof = Box::pin(async move {
-        loop {
-            let mut byte = [0u8; 1];
-            match stream.read(&mut byte).await {
-                Ok(0) => break,
-                Ok(_) => {}
-                // Windows reports a terminated peer as RST, not FIN: either
-                // proves the child is gone. A live child holds the socket
-                // open, so neither occurs before the reap.
-                Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => break,
-                Err(error) => panic!("liveness probe failed: {error}"),
+    #[cfg(unix)]
+    let mut eof = {
+        let (stream, _) = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::select! {
+                result = &mut pending => panic!("verifier exited before readiness: {result:?}"),
+                accepted = listener.accept() => accepted.unwrap(),
             }
-        }
-    });
-    assert!(still_pending(eof.as_mut()).await);
+        })
+        .await
+        .unwrap();
+        let mut stream = tokio::io::BufReader::new(stream);
+        let mut line = String::new();
+        tokio::time::timeout(Duration::from_secs(5), stream.read_line(&mut line))
+            .await
+            .unwrap()
+            .unwrap();
+        let _: u32 = line.trim().parse().unwrap();
+        // Portable child-liveness probe: the child never sends again, so a read
+        // pends while it lives and resolves EOF once it is reaped. No /proc.
+        let mut eof = Box::pin(async move {
+            loop {
+                let mut byte = [0u8; 1];
+                match stream.read(&mut byte).await {
+                    Ok(0) => break,
+                    Ok(_) => {}
+                    Err(error) => panic!("liveness probe failed: {error}"),
+                }
+            }
+        });
+        assert!(still_pending(eof.as_mut()).await);
+        eof
+    };
+    // Windows readiness and liveness via PID file: the sleeper publishes $PID,
+    // and the PID cannot be recycled while the leader is unreaped.
+    #[cfg(windows)]
+    let child_pid: u32 = {
+        let pidfile = f.root.join("ws/target/pid");
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                if pidfile.exists() {
+                    break;
+                }
+                assert!(!pending.is_finished(), "verifier exited before readiness");
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("verifier child never published its PID");
+        let text = std::fs::read_to_string(&pidfile).unwrap();
+        let pid: u32 = text.trim().parse().expect("child pid");
+        assert!(!pid_dead(pid), "the child died before the cancel probe");
+        pid
+    };
 
     let mut cancel = Box::pin(f.task.cancel());
     poll_pending(cancel.as_mut()).await;
@@ -296,8 +342,14 @@ async fn cancel_acknowledges_after_real_reap_while_the_mailbox_serves() {
         durable_status(&f.store, f.task.task_id(), "Cancelled").await,
         "cancel intent was not durable before the drain"
     );
+    #[cfg(unix)]
     assert!(
         still_pending(eof.as_mut()).await,
+        "the child was already reaped when the cancel intent became durable"
+    );
+    #[cfg(windows)]
+    assert!(
+        !pid_dead(child_pid),
         "the child was already reaped when the cancel intent became durable"
     );
     assert!(
@@ -320,11 +372,8 @@ async fn cancel_acknowledges_after_real_reap_while_the_mailbox_serves() {
         .expect("the child socket never closed: the acknowledgement preceded the actual reap");
     #[cfg(windows)]
     {
-        drop(eof);
-        // Windows process death reaches peers as RST, FIN, or (lingering
-        // inherited handles) nothing at all — socket closure is not a reap
-        // proof there. The PID itself is: it cannot be recycled while the
-        // leader is unreaped, and OpenProcess fails once it is gone.
+        // Socket closure is not a reap proof on Windows (RST/FIN/lingering
+        // handles vary); the PID itself is.
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         while !pid_dead(child_pid) {
             assert!(
