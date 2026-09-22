@@ -266,6 +266,7 @@ fn fail(code: &str, message: String) -> CommandResult {
 fn core_err(error: &CoreError) -> CommandResult {
     let code = match error {
         CoreError::UnknownTask(_) => "unknown_task",
+        CoreError::TaskAlreadyOwned(_) => "task_already_owned",
         CoreError::IllegalTransition { .. } => "illegal_transition",
         CoreError::MailboxFull => "mailbox_full",
         CoreError::SupervisorGone => "supervisor_gone",

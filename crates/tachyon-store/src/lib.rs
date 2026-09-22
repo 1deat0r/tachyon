@@ -12,7 +12,7 @@
 
 #![warn(unsafe_code)]
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -113,6 +113,7 @@ pub struct TransitionState<'a> {
 
 /// The single logical writer of correctness-critical state.
 pub struct StoreWriter {
+    database_path: PathBuf,
     pool: sqlx::SqlitePool,
     write: Mutex<()>,
 }
@@ -132,10 +133,21 @@ impl StoreWriter {
             .connect_with(options)
             .await?;
         sqlx::migrate!("./migrations").run(&pool).await?;
+        let database_path = data_dir
+            .join("state.db")
+            .canonicalize()
+            .map_err(sqlx::Error::Io)?;
         Ok(Self {
+            database_path,
             pool,
             write: Mutex::new(()),
         })
+    }
+
+    /// Canonical database identity, shared by independently opened aliases.
+    #[must_use]
+    pub fn database_path(&self) -> &Path {
+        &self.database_path
     }
 
     /// Inserts a session row.

@@ -10,6 +10,7 @@ pub mod fs;
 pub mod git;
 pub mod process;
 pub mod registry;
+pub mod workspace;
 
 use std::path::{Path, PathBuf};
 use tachyon_policy::{ApprovalRequest, Approvals, Policy, PolicyDecision, contain};
@@ -37,6 +38,8 @@ pub enum ToolError {
     Io(#[from] std::io::Error),
     #[error("process cancelled")]
     ProcessCancelled,
+    #[error("workspace lease cancelled")]
+    WorkspaceLeaseCancelled,
     #[error("process timed out after {0:?}")]
     ProcessTimeout(std::time::Duration),
     #[error("process exited with {0}")]

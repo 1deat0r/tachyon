@@ -15,7 +15,7 @@ use tachyon_types::ProviderId;
 
 use crate::{
     AgentDecision, ModelCapabilities, ModelError, ModelEvent, ModelFeature, ModelProvider,
-    ModelRequest, ModelResult, ProviderEstimate,
+    ModelRequest, ModelResult, ModelUsage, ProviderEstimate, UsageProvenance,
 };
 
 /// One scripted response.
@@ -25,9 +25,9 @@ pub struct FakeResponse {
     pub text: String,
     /// Committed decision returned with the result.
     pub decision: AgentDecision,
-    /// Reported input tokens.
+    /// Scripted input tokens, not measured usage.
     pub input_tokens: u32,
-    /// Reported output tokens.
+    /// Scripted output tokens, not measured usage.
     pub output_tokens: u32,
 }
 
@@ -142,6 +142,11 @@ impl ModelProvider for FakeModelProvider {
             decision: response.decision,
             input_tokens: response.input_tokens,
             output_tokens: response.output_tokens,
+            usage: ModelUsage {
+                input_tokens: Some(response.input_tokens),
+                output_tokens: Some(response.output_tokens),
+                provenance: UsageProvenance::Scripted,
+            },
             latency_ms: started.elapsed().as_secs_f64() * 1_000.0,
             provider: self.id.clone(),
             model: request.model.clone(),

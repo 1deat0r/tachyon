@@ -4,9 +4,46 @@ This file is updated by the implementing agent after every milestone.
 
 ## Current milestone
 
-Milestone 10 — Full debugging task (Milestone 9 complete, see gates below)
+Milestone 11 — next (Milestone 10 complete, see gates below)
 
 ## Completed gates
+
+- 2026-09-22 Milestone 10 — Full debugging task: provider-neutral core
+  runtime joining evidence, model, recoverable mutation and supervisor-owned
+  verification on the production supervisor path (bounded `fs.read`
+  evidence with hash provenance, validated stage IR with lowered router
+  placeholders, typed proposals with conjunctive hard-binding and
+  `base_hash` gates before mutation, typed mutation intent, exact-hash
+  approval binding, FNV-1a freshness with a pinned BLAKE3 boundary).
+  One supervisor per (state-database, TaskId) with owned jobs, ack-after-
+  drain steering, Recovering-not-Completed restarts, and the shared
+  workspace lease held from baseline through rehash to the durable
+  completion transaction (alias spellings share the key). Strict
+  task-scoped recovery with zero writes on denied/corrupt/unknown input;
+  aliased dependency selection resolves or broadens, never ignores.
+  Gate: the checked-in broken auth-refresh fixture fails its regression
+  first; the runtime applies the model-proposed repair via authorized M8
+  mutation and selected M9 checks and reaches durable `Completed`
+  (measured: full concurrency 4, serial 1, unknowns null, n=1 per mode;
+  no speed claim). Wrong patch, Complete-alone, unknown capability,
+  denied/escaped path, migration write, stale evidence and unbound
+  constraints all refuse with zero writes; delayed-provider steering and
+  real `exit(137)` crash recovery preserve identity and contract.
+  Tests: full workspace 65 suites, 330 passed / 0 failed default
+  (338 all-features); `fmt`, `check`, strict `clippy` clean.
+- 2026-09-22 R1 board (5 seats): 1 BUILD + 4 CONDITIONAL with executed
+  proof — pre-mutation gate enforced only the first hard binding,
+  scopeless contracts authorized any path, mutation intent accepted
+  arbitrary JSON, no full-mailbox burst barrier, unpinned FNV/BLAKE3
+  boundary, undocumented example orchestration. Adjudication: all
+  accepted as real. Fixes: conjunctive binding enforcement with
+  regression, scopeless-write denial, typed `MutationIntent`, exact-hash
+  foreign-grant regression, 600-sender burst barrier, portable socket-EOF
+  liveness probe (no `/proc`), boundary pin and driver note.
+  Competing-mutation and pending-ack barriers already held as unit tests.
+- 2026-09-22 R2 board: unanimous BUILD — each fix verified by quoted
+  source plus rerun outputs. Milestone 10 GATED. Report:
+  `docs/milestones/M10_REPORT.md`.
 
 - 2026-09-22 Milestone 9 — Verification-gated completion: `tachyon-verify`
   (typed `AcceptanceContract` with legacy fail-closed recovery, authorized

@@ -1,10 +1,11 @@
 //! Path-based project detection; Cargo, not heuristic TOML parsing, validates manifests.
 //!
 //! Affected selection uses manifest locations plus a reverse-dependency
-//! closure over workspace `Cargo.toml` files. Dependency names come from a
-//! small line-oriented reader (package name plus dependency section entries);
-//! anything it cannot establish broadens conservatively to the workspace
-//! check instead of silently omitting a possibly affected test.
+//! closure over workspace `Cargo.toml` files. The narrow metadata recognizer
+//! supports flat dependency sections, simple version/path entries and inline
+//! `package` renames. Inheritance, target/separate dependency tables, complex
+//! values and unknown syntax explicitly append `cargo test --offline --workspace`.
+//! No resolver subprocess or network access is needed to make that safe choice.
 use crate::{CommandCheck, VerificationRisk, VerifyError, WorkspaceSnapshot};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -129,10 +130,7 @@ fn reverse_dependents(
         }
         dependencies.insert(manifest.clone(), parsed.dependencies);
     }
-    let by_name: BTreeMap<&str, &str> = packages
-        .iter()
-        .map(|(manifest, name)| (name.as_str(), manifest.as_str()))
-        .collect();
+
     let mut names: BTreeSet<&str> = BTreeSet::new();
     for manifest in affected {
         if let Some(name) = packages.get(manifest) {
@@ -159,8 +157,7 @@ fn reverse_dependents(
             }
         }
     }
-    // Dependents whose names never resolved still broaden via the caller.
-    let _ = by_name;
+
     Ok(extra)
 }
 
@@ -174,84 +171,121 @@ struct ParsedManifest {
 fn parse_manifest(content: &str) -> Option<ParsedManifest> {
     let mut name = None;
     let mut dependencies = BTreeSet::new();
-    let mut section = String::new();
+    let mut section = "";
+    let mut package = false;
+    let mut workspace = false;
     for raw in content.lines() {
+        // Multiline strings can contain apparent headers/assignments. This is
+        // not a TOML parser: refuse them rather than interpreting their text.
+        if raw.contains("\"\"\"") || raw.contains("'''") {
+            return None;
+        }
         let line = raw.split('#').next().unwrap_or("").trim();
         if line.is_empty() {
             continue;
         }
-        if line.starts_with('[') && line.ends_with(']') {
-            section.clear();
-            section.push_str(line[1..line.len() - 1].trim());
-            // `[dependencies.foo]` style headers declare `foo` directly.
-            if let Some(declared) = dependency_header(&section) {
-                dependencies.insert(declared);
-            }
-            continue;
-        }
-        if !is_dependency_section(&section) {
-            if section == "package"
-                && let Some(value) = assignment(line, "name")
+        if line.starts_with('[') {
+            section = line.strip_prefix('[')?.strip_suffix(']')?.trim();
+            // Only flat dependency tables and known non-dependency tables are
+            // understood. Unknown/quoted/dotted/target/inherited forms broaden.
+            if !section.split('.').all(simple_name)
+                || !(is_dependency_section(section) || non_dependency_section(section))
             {
-                name = Some(value);
+                return None;
             }
+            package |= section == "package";
+            workspace |= section == "workspace";
             continue;
         }
-        let (key, _) = line.split_once('=')?;
-        let key = key.trim().trim_matches(['\'', '"']);
-        if key.is_empty() {
+        if section.is_empty() {
+            // Root dotted assignments or inline tables may define dependencies.
             return None;
         }
-        dependencies.insert(key.to_owned());
+        if section == "package" {
+            let (key, value) = line.split_once('=')?;
+            if key.trim() == "name" {
+                let value = simple_string(value.trim())?;
+                if name.is_some() || !simple_name(value) {
+                    return None;
+                }
+                name = Some(value.to_owned());
+            }
+        } else if is_dependency_section(section) {
+            let (key, value) = line.split_once('=')?;
+            dependencies.insert(dependency_name(key.trim(), value.trim())?);
+        }
+    }
+    if (package && name.is_none()) || (!package && !workspace) {
+        return None;
     }
     Some(ParsedManifest { name, dependencies })
 }
 
-fn is_dependency_section(section: &str) -> bool {
-    section == "dependencies"
-        || section == "dev-dependencies"
-        || section == "build-dependencies"
-        || section.starts_with("dependencies.")
-        || section.starts_with("dev-dependencies.")
-        || section.starts_with("build-dependencies.")
-        || section.contains(".dependencies")
-}
-
-fn dependency_header(section: &str) -> Option<String> {
-    let mut parts = section.split('.').map(str::trim);
-    let kind = parts.next()?;
-    if kind != "dependencies" && kind != "dev-dependencies" && kind != "build-dependencies" {
-        // `[target.<spec>.dependencies.<name>]` form: find the segment.
-        let segments: Vec<&str> = section.split('.').map(str::trim).collect();
-        let index = segments.iter().position(|part| {
-            *part == "dependencies" || *part == "dev-dependencies" || *part == "build-dependencies"
-        })?;
-        return segments
-            .get(index + 1)
-            .map(|name| name.trim().trim_matches(['\'', '"']).to_owned())
-            .filter(|name| !name.is_empty());
-    }
-    parts
-        .next()
-        .map(|name| name.trim_matches(['\'', '"']).to_owned())
-        .filter(|name| !name.is_empty())
-}
-
-fn assignment(line: &str, key: &str) -> Option<String> {
-    let (found, value) = line.split_once('=')?;
-    if found.trim() != key {
+/// Recognize only simple version strings and flat, string-valued dependency
+/// tables. In particular, the Cargo package name is not necessarily the key.
+/// Features, inheritance, escaped strings and other forms require Cargo's full
+/// resolver, so they deliberately fall back to workspace verification.
+fn dependency_name(key: &str, value: &str) -> Option<String> {
+    if !simple_name(key) {
         return None;
     }
-    let value = value.trim();
-    value
-        .strip_prefix('"')
-        .and_then(|rest| rest.strip_suffix('"'))
-        .or_else(|| {
-            value
-                .strip_prefix('\'')
-                .and_then(|rest| rest.strip_suffix('\''))
+    if simple_string(value).is_some() {
+        return Some(key.to_owned());
+    }
+    let fields = value.strip_prefix('{')?.strip_suffix('}')?;
+    let mut seen = BTreeSet::new();
+    let mut name = key;
+    for field in fields.split(',') {
+        let (key, value) = field.trim().split_once('=')?;
+        let key = key.trim();
+        if !seen.insert(key) {
+            return None;
+        }
+        let value = simple_string(value.trim())?;
+        match key {
+            "package" if simple_name(value) => name = value,
+            "path" | "version" | "registry" | "git" | "branch" | "tag" | "rev" => {}
+            _ => return None,
+        }
+    }
+    Some(name.to_owned())
+}
+
+fn simple_name(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+fn simple_string(value: &str) -> Option<&str> {
+    let quote = value.chars().next()?;
+    if !matches!(quote, '\'' | '"') {
+        return None;
+    }
+    let inner = value.strip_prefix(quote)?.strip_suffix(quote)?;
+    (!inner.contains(['\\', '\'', '"']) && !inner.chars().any(char::is_control)).then_some(inner)
+}
+
+fn is_dependency_section(section: &str) -> bool {
+    matches!(
+        section,
+        "dependencies" | "dev-dependencies" | "build-dependencies"
+    )
+}
+
+fn non_dependency_section(section: &str) -> bool {
+    matches!(
+        section,
+        "package" | "workspace" | "workspace.package" | "features" | "lib" | "lints"
+    ) || ["package.metadata", "profile", "lints", "workspace.lints"]
+        .iter()
+        .any(|prefix| {
+            section == *prefix
+                || section
+                    .strip_prefix(prefix)
+                    .is_some_and(|rest| rest.starts_with('.'))
         })
-        .map(str::to_owned)
 }
 
 fn cargo(args: Vec<String>) -> CommandCheck {

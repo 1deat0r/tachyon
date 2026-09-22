@@ -11,6 +11,8 @@
 
 #![warn(unsafe_code)]
 
+pub(crate) mod ownership;
+pub mod runtime;
 mod verification;
 pub use tachyon_verify::AcceptanceContract;
 pub use verification::VerificationState;
@@ -18,6 +20,7 @@ pub use verification::VerificationState;
 use std::str::FromStr;
 use std::sync::Arc;
 
+use ownership::{OwnedWorkers, TaskLifecycle, TaskOwnership};
 use serde::{Deserialize, Serialize};
 use tachyon_ir::ExecutionGraph;
 use tachyon_store::{JournalEvent, StoreWriter, TaskRow};
@@ -47,6 +50,9 @@ pub enum CoreError {
     /// No task (or no supervisor) for this id.
     #[error("unknown task: {0}")]
     UnknownTask(TaskId),
+    /// Another live supervisor or draining worker owns this durable task.
+    #[error("task already owned: {0}")]
+    TaskAlreadyOwned(TaskId),
     /// Transition is not allowed from the current status.
     #[error("illegal transition from {from} to {to}")]
     IllegalTransition {
@@ -344,6 +350,7 @@ enum SupervisorCommand {
 pub struct SupervisorHandle {
     task_id: TaskId,
     tx: mpsc::Sender<SupervisorCommand>,
+    lifecycle: TaskLifecycle,
 }
 
 impl SupervisorHandle {
@@ -423,8 +430,24 @@ impl SupervisorHandle {
         receive(rx).await?
     }
 
+    /// Close command admission, cancel owned work and await exclusive-owner release.
+    /// Idempotent across clones; retained handles fail closed after shutdown starts.
+    /// Dropping this future does not revoke the shutdown request. This is not a
+    /// task cancellation transition: already acknowledged durable state survives.
+    /// Non-abortable work may delay release; timing out the caller's wait does
+    /// not authorize a second owner or abandon that work.
+    pub async fn shutdown(&self) -> Result<(), CoreError> {
+        self.lifecycle.shutdown.cancel();
+        self.lifecycle.released.cancelled().await;
+        Ok(())
+    }
+
     async fn send(&self, command: SupervisorCommand) {
-        let _ = self.tx.send(command).await;
+        tokio::select! {
+            biased;
+            () = self.lifecycle.shutdown.cancelled() => {},
+            result = self.tx.send(command) => { let _ = result; },
+        }
     }
 }
 
@@ -443,6 +466,7 @@ pub async fn create_task(
 ) -> Result<SupervisorHandle, CoreError> {
     let now = Timestamp::now();
     let task_id = TaskId::generate();
+    let ownership = TaskOwnership::acquire(store.database_path(), task_id)?;
     let state = TaskState {
         id: task_id,
         session_id,
@@ -481,16 +505,23 @@ pub async fn create_task(
             &created,
         )
         .await?;
-    Ok(spawn(state, 0, Some(0), store))
+    Ok(spawn(state, 0, Some(0), store, ownership))
 }
 
 /// Rebuilds a supervisor for an existing task: loads the snapshot, replays
 /// the journal tail, marks the task `Recovering` during reconstruction,
 /// then restores its pre-crash status.
+///
+/// Returns [`CoreError::TaskAlreadyOwned`] before reading any state if an actor
+/// or draining worker still owns this task. Await [`SupervisorHandle::shutdown`]
+/// before an in-process restart; merely dropping a handle is not a drain barrier.
 pub async fn recover_task(
     task_id: TaskId,
     store: Arc<StoreWriter>,
 ) -> Result<SupervisorHandle, CoreError> {
+    // Reserve before even reading a snapshot: a second writer must never
+    // reconstruct stale state while the admitted actor advances its journal.
+    let ownership = TaskOwnership::acquire(store.database_path(), task_id)?;
     let row = store
         .load_task(&task_id.to_string())
         .await?
@@ -513,6 +544,7 @@ pub async fn recover_task(
         row.snapshot_seq.unwrap_or(-1).max(covered),
         snapshot_base,
         store.clone(),
+        ownership,
     );
     if interrupted {
         // Commands can have unknown effects; never silently replay after crash.
@@ -520,7 +552,13 @@ pub async fn recover_task(
             .await?;
     }
     let snapshot_base = app.snapshot_base;
-    Ok(spawn(app.state, app.covered, snapshot_base, store))
+    Ok(spawn(
+        app.state,
+        app.covered,
+        snapshot_base,
+        store,
+        app.ownership,
+    ))
 }
 
 /// Snapshot state plus the sequence it covers.
@@ -653,20 +691,38 @@ fn spawn(
     covered: i64,
     snapshot_base: Option<i64>,
     store: Arc<StoreWriter>,
+    ownership: TaskOwnership,
 ) -> SupervisorHandle {
     let task_id = state.id;
     let (tx, rx) = mpsc::channel(SUPERVISOR_MAILBOX);
-    tokio::spawn(run_loop(state, covered, snapshot_base, store, rx));
-    SupervisorHandle { task_id, tx }
+    let lifecycle = ownership.lifecycle();
+    tokio::spawn(run_loop(
+        state,
+        covered,
+        snapshot_base,
+        store,
+        ownership,
+        rx,
+    ));
+    SupervisorHandle {
+        task_id,
+        tx,
+        lifecycle,
+    }
 }
 
-struct Loop {
+pub(crate) struct Loop {
+    pub(crate) ownership: TaskOwnership,
     state: TaskState,
     covered: i64,
     snapshot_base: Option<i64>,
     store: Arc<StoreWriter>,
-    jobs: tokio::task::JoinSet<Result<VerificationReport, VerifyError>>,
+    /// Owned effect workers. Every job carries its own private operation key and
+    /// its workspace-lease guard; the actor never awaits one inside a handler.
+    jobs: OwnedWorkers<verification::JobResult>,
     active: Option<verification::ActiveVerification>,
+    /// Control acknowledgements that wait for the actual effect drain.
+    drain: Option<verification::DrainAck>,
 }
 
 async fn run_loop(
@@ -674,24 +730,35 @@ async fn run_loop(
     covered: i64,
     snapshot_base: Option<i64>,
     store: Arc<StoreWriter>,
+    ownership: TaskOwnership,
     mut rx: mpsc::Receiver<SupervisorCommand>,
 ) {
-    let mut app = Loop::new(state, covered, snapshot_base, store);
+    let lifecycle = ownership.lifecycle();
+    let _close_on_drop = lifecycle.shutdown.clone().drop_guard();
+    let mut app = Loop::new(state, covered, snapshot_base, store, ownership);
     // The loop lives until every handle is dropped, so terminal tasks keep
     // answering reads and rejecting mutations with IllegalTransition.
     loop {
         tokio::select! {
             biased;
+            () = lifecycle.shutdown.cancelled() => {
+                rx.close();
+                // Refuse queued commands too, rather than applying them after
+                // shutdown has closed admission through every handle clone.
+                drop(rx);
+                app.stop_owned_work().await;
+                break;
+            }
             command = rx.recv() => {
                 if let Some(command) = command {
                     app.handle(command).await;
                 } else {
-                    let _ = app.stop_verification().await;
+                    app.stop_owned_work().await;
                     break;
                 }
-            },
+            }
             joined = app.jobs.join_next(), if !app.jobs.is_empty() => {
-                if let Some(joined) = joined { app.finish_verification(joined).await; }
+                if let Some(joined) = joined { app.finish_job(joined).await; }
             }
         }
     }
@@ -718,14 +785,17 @@ impl Loop {
         covered: i64,
         snapshot_base: Option<i64>,
         store: Arc<StoreWriter>,
+        ownership: TaskOwnership,
     ) -> Self {
         Self {
+            jobs: OwnedWorkers::new(ownership.clone()),
+            ownership,
             state,
             covered,
             snapshot_base,
             store,
-            jobs: tokio::task::JoinSet::new(),
             active: None,
+            drain: None,
         }
     }
 
@@ -737,23 +807,16 @@ impl Loop {
                 risk,
                 reply,
             } => {
-                let outcome = self.configure_verification(context, contract, risk).await;
-                let _ = reply.send(outcome);
+                self.configure_verification(context, contract, risk, reply);
             }
             SupervisorCommand::VerifyAndComplete { context, reply } => {
-                self.start_verification(context, reply).await;
+                self.start_verification(context, reply);
             }
             SupervisorCommand::GetState { reply } => {
                 let _ = reply.send(Ok(self.state.clone()));
             }
             SupervisorCommand::AddUserMessage { message, reply } => {
-                let outcome = match self.stop_verification().await {
-                    Ok(()) => {
-                        self.transition_journalled(StateEvent::Message { message })
-                            .await
-                    }
-                    Err(error) => Err(error),
-                };
+                let outcome = self.steer(StateEvent::Message { message }).await;
                 let _ = reply.send(outcome);
             }
             SupervisorCommand::AddConstraint {
@@ -768,32 +831,18 @@ impl Loop {
                     strength,
                     created_revision: self.state.revision + 1,
                 };
-                let outcome = match self.stop_verification().await {
-                    Ok(()) => {
-                        self.transition_journalled(StateEvent::Constraint { constraint })
-                            .await
-                    }
-                    Err(error) => Err(error),
-                };
+                let outcome = self.steer(StateEvent::Constraint { constraint }).await;
                 let _ = reply.send(outcome);
             }
             SupervisorCommand::Pause { reply } => {
-                let outcome = match self.stop_verification().await {
-                    Ok(()) => self.move_to(TaskStatus::Paused).await,
-                    Err(error) => Err(error),
-                };
-                let _ = reply.send(outcome);
+                self.control(TaskStatus::Paused, reply).await;
             }
             SupervisorCommand::Resume { reply } => {
                 let outcome = self.resume().await;
                 let _ = reply.send(outcome);
             }
             SupervisorCommand::Cancel { reply } => {
-                let outcome = match self.stop_verification().await {
-                    Ok(()) => self.move_to(TaskStatus::Cancelled).await,
-                    Err(error) => Err(error),
-                };
-                let _ = reply.send(outcome);
+                self.control(TaskStatus::Cancelled, reply).await;
             }
             SupervisorCommand::DecideApproval {
                 approval,
@@ -888,6 +937,13 @@ impl Loop {
     }
 
     async fn resume(&mut self) -> Result<TaskState, CoreError> {
+        // A pending control acknowledgement is still draining real effect
+        // workers; resuming would dispatch beside them.
+        if self.drain.is_some() || !self.jobs.is_empty() {
+            return Err(CoreError::VerificationBlocked(
+                "control acknowledgement is still draining owned effect workers".into(),
+            ));
+        }
         if self.state.status != TaskStatus::Paused {
             return Err(CoreError::IllegalTransition {
                 from: self.state.status,
@@ -909,6 +965,160 @@ mod tests {
     use tachyon_store::StoreWriter;
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    #[tokio::test]
+    async fn aborting_actor_wrapper_retains_ownership_until_effect_worker_drains() {
+        actor_failure_retains_ownership(false).await;
+    }
+
+    #[tokio::test]
+    async fn panicking_actor_wrapper_retains_ownership_until_effect_worker_drains() {
+        actor_failure_retains_ownership(true).await;
+    }
+
+    async fn actor_failure_retains_ownership(panic: bool) {
+        let (store, dir) = open_test_store().await;
+        let session = SessionId::generate();
+        store.create_session(&session.to_string()).await.unwrap();
+        let handle = create_task(
+            session,
+            WorkspaceId::generate(),
+            "owned effect".into(),
+            store.clone(),
+        )
+        .await
+        .unwrap();
+        let state = handle.get_state().await.unwrap();
+        handle.shutdown().await.unwrap();
+        let owner = super::TaskOwnership::acquire(store.database_path(), state.id).unwrap();
+        let lifecycle = owner.lifecycle();
+        let mut app = super::Loop::new(state.clone(), 0, Some(0), store.clone(), owner);
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let (release, blocked) = tokio::sync::oneshot::channel();
+        let (finished, drained) = tokio::sync::oneshot::channel();
+        let effect_path = dir.join("effect.receipt");
+        let worker_path = effect_path.clone();
+        app.jobs.spawn(async move {
+            tokio::task::spawn_blocking(move || {
+                let _ = entered.send(());
+                let _ = blocked.blocking_recv();
+                std::fs::write(worker_path, b"committed at safe boundary").unwrap();
+                let _ = finished.send(());
+            })
+            .await
+            .unwrap();
+            super::verification::test_support::unowned_job(state.id)
+        });
+        let (fail, failure) = tokio::sync::oneshot::channel();
+        let actor = tokio::spawn(async move {
+            let _app = app;
+            failure.await.unwrap();
+            panic!("injected actor wrapper panic");
+        });
+        started.await.unwrap();
+        if panic {
+            fail.send(()).unwrap();
+            assert!(actor.await.unwrap_err().is_panic());
+        } else {
+            actor.abort();
+            assert!(actor.await.unwrap_err().is_cancelled());
+        }
+        let duplicate = super::TaskOwnership::acquire(store.database_path(), state.id);
+        let admitted_early = duplicate.is_ok();
+        drop(duplicate);
+        assert!(!effect_path.exists());
+        // Always release the real blocking worker before asserting the failure.
+        release.send(()).unwrap();
+        drained.await.unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            lifecycle.released.cancelled(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read(effect_path).unwrap(),
+            b"committed at safe boundary"
+        );
+        store.close().await;
+        std::fs::remove_dir_all(dir).unwrap();
+        assert!(
+            !admitted_early,
+            "actor failure released ownership while its effect still ran"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_bypasses_full_mailbox_and_rejects_blocked_senders() {
+        use std::future::Future as _;
+        use std::task::Poll;
+        let task_id = tachyon_types::TaskId::generate();
+        let owner = super::TaskOwnership::acquire(
+            &std::env::temp_dir().join("tachyon-full-mailbox.db"),
+            task_id,
+        )
+        .unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let handle = super::SupervisorHandle {
+            task_id,
+            tx,
+            lifecycle: owner.lifecycle(),
+        };
+        let (reply, _response) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .try_send(super::SupervisorCommand::GetState { reply })
+            .ok()
+            .unwrap();
+        let mut command = Box::pin(handle.add_message("blocked admission".into()));
+        assert!(
+            std::future::poll_fn(|cx| Poll::Ready(command.as_mut().poll(cx).is_pending())).await
+        );
+        let mut shutdown = Box::pin(handle.shutdown());
+        assert!(
+            std::future::poll_fn(|cx| Poll::Ready(shutdown.as_mut().poll(cx).is_pending())).await
+        );
+        drop(shutdown);
+        assert!(matches!(
+            command.await,
+            Err(super::CoreError::SupervisorGone)
+        ));
+        assert!(matches!(
+            handle.get_state().await,
+            Err(super::CoreError::SupervisorGone)
+        ));
+        assert!(!handle.lifecycle.released.is_cancelled());
+        drop(owner);
+        handle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dropping_last_client_does_not_leave_a_self_owned_sender() {
+        let (store, dir) = open_test_store().await;
+        let session = SessionId::generate();
+        store.create_session(&session.to_string()).await.unwrap();
+        let handle = create_task(
+            session,
+            WorkspaceId::generate(),
+            "drop".into(),
+            store.clone(),
+        )
+        .await
+        .unwrap();
+        let id = handle.task_id();
+        let lifecycle = handle.lifecycle.clone();
+        drop(handle);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            lifecycle.released.cancelled(),
+        )
+        .await
+        .unwrap();
+        let recovered = recover_task(id, store.clone()).await.unwrap();
+        recovered.shutdown().await.unwrap();
+        store.close().await;
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     async fn open_test_store() -> (Arc<StoreWriter>, std::path::PathBuf) {
         let id = COUNTER.fetch_add(1, Ordering::SeqCst);
@@ -953,7 +1163,7 @@ mod tests {
         assert_eq!(cancelled.status, TaskStatus::Cancelled);
         let err = handle.add_message("too late".to_owned()).await.unwrap_err();
         assert!(matches!(err, super::CoreError::IllegalTransition { .. }));
-        drop(handle);
+        handle.shutdown().await.unwrap();
         store.close().await;
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -973,7 +1183,7 @@ mod tests {
         .unwrap();
         let task_id = handle.task_id();
         handle.add_message("before crash".to_owned()).await.unwrap();
-        drop(handle);
+        handle.shutdown().await.unwrap();
 
         let recovered = recover_task(task_id, store.clone()).await.unwrap();
         let state = recovered.get_state().await.unwrap();
@@ -984,7 +1194,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(continued.revision, 2);
-        drop(recovered);
+        recovered.shutdown().await.unwrap();
         store.close().await;
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -1011,7 +1221,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(row.snapshot_seq.unwrap_or(-1) >= 100);
-        drop(handle);
+        handle.shutdown().await.unwrap();
         store.close().await;
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -1039,7 +1249,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(row.snapshot_seq, Some(0));
-        drop(handle);
+        handle.shutdown().await.unwrap();
         // Restart must not reset the cadence to the journal tail: the 100th
         // transition since snapshot 0 still snapshots.
         let recovered = recover_task(task_id, store.clone()).await.unwrap();
@@ -1053,7 +1263,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(row.snapshot_seq, Some(100));
-        drop(recovered);
+        recovered.shutdown().await.unwrap();
         store.close().await;
         std::fs::remove_dir_all(&dir).unwrap();
     }

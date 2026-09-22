@@ -84,7 +84,7 @@ impl Fixture {
     }
 
     async fn close(self) {
-        drop(self.task);
+        self.task.shutdown().await.unwrap();
         self.store.close().await;
         std::fs::remove_dir_all(self.root).unwrap();
     }
@@ -191,6 +191,7 @@ async fn interrupted_journal_tail_is_not_replayed_as_a_fresh_verifier() {
         .await
         .unwrap();
     let id = f.task.task_id();
+    f.task.shutdown().await.unwrap();
     // Inject the durable point just before executor launch, with old row metadata.
     // No live worker is started by this fixture.
     f.store.append_event(&id.to_string(), "verification_started", &serde_json::json!({
@@ -207,7 +208,7 @@ async fn interrupted_journal_tail_is_not_replayed_as_a_fresh_verifier() {
             .is_err()
     );
     assert!(!f.context.workspace_root.join("target").exists());
-    drop(recovered);
+    recovered.shutdown().await.unwrap();
     f.close().await;
 }
 
@@ -330,6 +331,7 @@ async fn wrong_patch_refuses_completed_then_correct_patch_completes_durably() {
     let id = f.task.task_id();
     let row = f.store.load_task(&id.to_string()).await.unwrap().unwrap();
     assert_eq!(row.status, "Completed");
+    f.task.shutdown().await.unwrap();
     let recovered = recover_task(id, f.store.clone()).await.unwrap();
     assert_eq!(
         recovered.get_state().await.unwrap().status,
@@ -341,6 +343,6 @@ async fn wrong_patch_refuses_completed_then_correct_patch_completes_durably() {
             .await
             .is_err()
     );
-    drop(recovered);
+    recovered.shutdown().await.unwrap();
     f.close().await;
 }

@@ -17,6 +17,11 @@
 //! compensation. Commits are never auto-retried after a crash: recover
 //! first, then act on the report.
 
+mod authorized;
+mod scoped;
+pub use authorized::AuthorizedOp;
+pub use scoped::{RecoveryAction, RecoveryDisposition, ScopedRecoveryReport};
+
 use std::path::{Path, PathBuf};
 
 use tachyon_ir::{EffectClass, Idempotency};
@@ -35,8 +40,8 @@ pub const EFFECT_CLASS: EffectClass = EffectClass::ReversibleLocalMutation;
 /// Idempotency declared by every batch: rollback compensates.
 pub const IDEMPOTENCY: Idempotency = Idempotency::Compensatable;
 
-/// Temp-file marker: `<name>.tachyon-tmp-<batch8>`, always beside its target
-/// so renames stay on one filesystem. The recovery sweep deletes strays.
+/// Temp-file marker, always beside its target so renames stay on one
+/// filesystem. Full batch IDs distinguish ownership; names alone prove nothing.
 const TEMP_MARKER: &str = "tachyon-tmp";
 
 /// Restore-temp marker for atomic compensation (same placement rules).
@@ -96,13 +101,13 @@ pub struct RecoveryReport {
     pub aborted: Vec<MutationBatchId>,
     /// Batches that failed recovery, with reasons; siblings proceeded.
     pub batch_errors: Vec<(MutationBatchId, String)>,
-    /// Temp deletions that failed (best-effort sweep); strays persist.
+    /// Exact owned-temp deletions that failed; unproven paths are retained.
     pub sweep_errors: Vec<String>,
     /// Journal lines skipped as corrupt (lenient replay).
     pub journal_gaps: Vec<usize>,
     /// Files whose content matches neither pre- nor postimage.
     pub diverged: Vec<String>,
-    /// Stray temp files swept.
+    /// Exact journal-owned postimage temps removed (never a workspace sweep).
     pub swept_tmps: Vec<PathBuf>,
     /// Transitions performed by this run.
     pub changed: Vec<ChangedFile>,
@@ -146,12 +151,19 @@ impl MutationEngine {
     /// plan. Returns `StalePreimage` before writing anything when any base
     /// mismatches — prepare is all-or-nothing.
     pub fn prepare(&self, specs: &[PatchSpec]) -> Result<PreparedBatch, MutationError> {
+        self.prepare_with_id(MutationBatchId::generate(), specs)
+    }
+
+    fn prepare_with_id(
+        &self,
+        id: MutationBatchId,
+        specs: &[PatchSpec],
+    ) -> Result<PreparedBatch, MutationError> {
         if specs.is_empty() {
             return Err(MutationError::InvalidPath(
                 "batch holds no files".to_owned(),
             ));
         }
-        let id = MutationBatchId::generate();
         // Verify everything before writing anything. Each file is read
         // exactly once: the bytes feed the hash check, the preimage spool,
         // and nothing else — no verify-then-reread window.
@@ -196,7 +208,11 @@ impl MutationEngine {
             if let Some(parent) = target.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            write_synced(&temp, &spec.new_content)?;
+            // `create_new`: an unowned occupant of the derived temp path is
+            // never truncated into ownership. Authorized preparation refuses
+            // such a path before reaching here; the trusted caller excludes
+            // concurrent writers (see RECOVERY.md).
+            write_new_synced(&temp, &spec.new_content)?;
             files.push(FileMutation {
                 path: rel,
                 pre_hash: spec.base_hash.clone(),
@@ -339,12 +355,18 @@ impl MutationEngine {
     /// then finishes still-valid files (`finish = true`) or compensates
     /// batches back to preimages (`finish = false`). Each batch is
     /// isolated: one batch's failure is recorded, siblings proceed.
-    /// Diverged files are reported, never written. The temp sweep runs
-    /// after all action, so compensated batches lose protection.
+    /// Diverged files are reported, never written. Cleanup visits only exact
+    /// journal-owned terminal temps with matching postimage hashes; foreign,
+    /// changed and orphan marker files survive. Syntax gaps block all effects.
+    /// This legacy entry has no task policy context; runtimes use `recover_scoped`.
     pub fn recover(&self, finish: bool) -> Result<RecoveryReport, MutationError> {
         let mut report = RecoveryReport::default();
         let (batches, gaps) = self.journal.replay_lenient()?;
         report.journal_gaps = gaps;
+        if !report.journal_gaps.is_empty() {
+            // A damaged journal cannot authorize compensation or cleanup.
+            return Ok(report);
+        }
         for (id, replayed) in &batches {
             if replayed.completed {
                 continue;
@@ -478,7 +500,7 @@ impl MutationEngine {
 
     /// Restores one file atomically: preimage bytes go to a restore temp
     /// beside the target, sync, then rename over it — a crash mid-restore
-    /// leaves the target untouched and a sweepable temp, so compensation
+    /// leaves the target untouched and an orphan temp (retained), so compensation
     /// is retryable. Files this batch created (no preimage) are removed.
     fn restore(&self, file: &FileMutation) -> Result<(), MutationError> {
         let target = self.resolve(&file.path)?;
@@ -492,9 +514,8 @@ impl MutationEngine {
                     || "file".to_owned(),
                     |name| name.to_string_lossy().into_owned(),
                 );
-                // Restore temp is hidden (sweepable), engine-marked, and
-                // unique per call: a stale one from a crashed restore must
-                // never alias a live one.
+                // Legacy restore temps are not journal-owned cleanup paths.
+                // A crash orphan is retained rather than guessed to be garbage.
                 let temp_name = format!(
                     ".{file_name}.{RESTORE_MARKER}-{}",
                     Timestamp::now().as_micros()
@@ -513,69 +534,56 @@ impl MutationEngine {
         Ok(())
     }
 
-    /// Deletes stray engine temps no actionable batch references. Referenced
-    /// identity is the workspace-relative temp path (not the bare name, so
-    /// same-name strays elsewhere are still swept); only hidden files
-    /// carrying a Tachyon marker qualify, so user files merely containing
-    /// the marker survive. Symlinks are never descended. Deletion is
-    /// best-effort: failures are recorded in the report, never propagated,
-    /// so one unreadable file cannot deny recovery to every batch.
-    /// Pre-existing directories are never removed.
+    /// Cleans only terminal batches' exact journal-owned postimage temps.
+    /// No workspace walk: names, orphan restore files and another task's
+    /// artifacts are not evidence of ownership. Changed contents survive.
     fn sweep_tmps(
         &self,
         batches: &std::collections::BTreeMap<MutationBatchId, crate::journal::ReplayedBatch>,
         sweep_errors: &mut Vec<String>,
     ) -> Vec<PathBuf> {
-        let mut referenced = std::collections::HashSet::new();
-        for batch in batches.values() {
-            if batch.completed {
-                continue;
-            }
-            for file in &batch.files {
-                if file.state == FileState::Committed || file.state == FileState::RolledBack {
-                    continue;
-                }
-                if let Some(parent) = Path::new(&file.path).parent() {
-                    referenced.insert(parent.join(&file.temp_name));
-                } else {
-                    referenced.insert(PathBuf::from(&file.temp_name));
-                }
-            }
-        }
         let mut swept = Vec::new();
-        let mut dirs = vec![self.workspace_root.clone()];
-        while let Some(dir) = dirs.pop() {
-            let Ok(entries) = std::fs::read_dir(&dir) else {
-                continue;
-            };
-            for entry in entries.flatten() {
-                let path = entry.path();
-                // Never follow symlinks: metadata first, descend only real
-                // directories inside the workspace.
-                let kind = std::fs::symlink_metadata(&path).map(|meta| meta.file_type());
-                let Ok(kind) = kind else { continue };
-                if kind.is_symlink() {
+        for batch in batches.values() {
+            for file in &batch.files {
+                if !batch.completed
+                    && !matches!(file.state, FileState::Committed | FileState::RolledBack)
+                {
                     continue;
                 }
-                if kind.is_dir() {
-                    dirs.push(path);
-                    continue;
-                }
-                let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                let Ok(rel) = normalize_rel(&file.path) else {
                     continue;
                 };
-                if !is_engine_temp(name) {
+                if rel != file.path {
                     continue;
                 }
-                let rel = path
-                    .strip_prefix(&self.workspace_root)
-                    .map_or_else(|_| path.clone(), std::path::Path::to_path_buf);
-                if referenced.contains(&rel) {
+                let Some(name) = Path::new(&rel).file_name().and_then(|name| name.to_str()) else {
+                    continue;
+                };
+                if file.temp_name != Self::temp_name(name, &batch.id, TEMP_MARKER) {
                     continue;
                 }
-                match std::fs::remove_file(&path) {
-                    Ok(()) => swept.push(path),
-                    Err(error) => sweep_errors.push(format!("{}: {error}", path.display())),
+                let Ok(target) = self.resolve(&rel) else {
+                    continue;
+                };
+                let temp = target.with_file_name(&file.temp_name);
+                // Canonical identity must not redirect a deletion through a
+                // symlink, including a symlink in an ancestor directory.
+                let Ok(root) = std::fs::canonicalize(&self.workspace_root) else {
+                    continue;
+                };
+                let expected = root.join(Path::new(&rel).with_file_name(&file.temp_name));
+                let Ok(canonical) = std::fs::canonicalize(&temp) else {
+                    continue;
+                };
+                if canonical != expected
+                    || !std::fs::symlink_metadata(&temp).is_ok_and(|meta| meta.is_file())
+                    || file_hash(&temp) != Some(file.post_hash.clone())
+                {
+                    continue;
+                }
+                match std::fs::remove_file(&temp) {
+                    Ok(()) => swept.push(temp),
+                    Err(error) => sweep_errors.push(error.to_string()),
                 }
             }
         }
@@ -639,6 +647,20 @@ fn write_synced(path: &Path, bytes: &[u8]) -> Result<(), MutationError> {
     Ok(())
 }
 
+/// Writes `bytes` to a new file at `path` and syncs before returning. Fails
+/// instead of truncating an existing file: a temp path that already exists is
+/// not this batch's staging file (see RECOVERY.md).
+fn write_new_synced(path: &Path, bytes: &[u8]) -> Result<(), MutationError> {
+    use std::io::Write as _;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    Ok(())
+}
+
 /// Best-effort parent-directory sync (durability hint; the journal stays
 /// the source of truth on platforms without directory sync).
 fn sync_parent(path: &Path) {
@@ -647,12 +669,6 @@ fn sync_parent(path: &Path) {
     {
         let _ignored = dir.sync_all();
     }
-}
-
-/// Whether `name` is an engine temp: hidden, carrying a Tachyon marker.
-/// User files merely containing the marker (no leading dot) never qualify.
-fn is_engine_temp(name: &str) -> bool {
-    name.starts_with('.') && (name.contains(TEMP_MARKER) || name.contains(RESTORE_MARKER))
 }
 
 /// Maps tool-layer failures into [`MutationError::Io`].

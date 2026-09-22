@@ -93,6 +93,7 @@ impl FileState {
 /// One file inside a batch: hashes, preimage pointer, retained postimage,
 /// temp location, state.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FileMutation {
     /// Workspace-relative path in journal-key form.
     pub path: String,
@@ -150,6 +151,9 @@ pub enum MutationError {
     /// (empty batch, duplicate path). Never transient.
     #[error("invalid mutation path: {0}")]
     InvalidPath(String),
+    /// Strict recovery refused before an unsafe or unauthorized effect.
+    #[error("mutation recovery blocked: {0}")]
+    RecoveryBlocked(String),
     /// Transient IO below the batch logic (disk full, permission flap).
     /// Retryable only before anything committed.
     #[error("mutation IO failure: {0}")]
@@ -174,6 +178,7 @@ impl MutationError {
             | Self::Compensated(_)
             | Self::AlreadyCompleted(_)
             | Self::InvalidPath(_)
+            | Self::RecoveryBlocked(_)
             | Self::JournalCorrupt(_) => false,
         }
     }

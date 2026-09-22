@@ -8,8 +8,8 @@ genuine unresolved uncertainty.
 
 > LLMs are reasoning accelerators, not Tachyon's operating system.
 
-**Status (Sep 2026):** early implementation. Milestone 9
-(verification-gated completion) is done and gated; see [`PROGRESS.md`](PROGRESS.md). Not yet a daily
+**Status (Sep 2026):** early implementation. Milestone 10
+(full debugging task) is done and gated; see [`PROGRESS.md`](PROGRESS.md). Not yet a daily
 driver — watch this repo if the architecture interests you.
 
 ## Quickstart

@@ -5,14 +5,11 @@ mod tests;
 use crate::{Clause, VerificationPlan, VerifyError, WorkspaceSnapshot, plan::leaf};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use std::{
     collections::{BTreeMap, HashMap},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
-};
-use std::{
-    path::{Path, PathBuf},
-    sync::OnceLock,
 };
 use tachyon_ir::{ExecutionNode, ExecutorKind, NodeStatus};
 use tachyon_scheduler::{
@@ -21,6 +18,7 @@ use tachyon_scheduler::{
 use tachyon_tools::{
     ToolsContext,
     process::{ProcessSpec, run_cancellable},
+    workspace::WorkspaceLease,
 };
 use tachyon_types::{ArtifactId, NodeId, TaskId};
 use tokio_util::sync::CancellationToken;
@@ -116,6 +114,8 @@ struct CheckRunner {
     plan: Arc<VerificationPlan>,
     context: Arc<ToolsContext>,
     evidence: Mutex<BTreeMap<NodeId, CheckEvidence>>,
+    lease: WorkspaceLease,
+    lifetime: Arc<dyn Send + Sync>,
 }
 
 #[derive(Default)]
@@ -207,6 +207,17 @@ impl CheckRunner {
 }
 
 impl CheckRunner {
+    async fn capture(&self) -> Result<WorkspaceSnapshot, VerifyError> {
+        let context = self.context.clone();
+        let guards = (self.lease.clone(), self.lifetime.clone());
+        tokio::task::spawn_blocking(move || {
+            let _guards = guards;
+            WorkspaceSnapshot::capture_authorized(&context)
+        })
+        .await
+        .map_err(blocked)?
+    }
+
     async fn check(
         &self,
         node: &ExecutionNode,
@@ -218,7 +229,7 @@ impl CheckRunner {
             .get(&node.id)
             .ok_or_else(|| VerifyError::Blocked("missing required check".into()))?;
         let mut record = CheckEvidence::empty(node.id);
-        let before = capture(self.context.clone()).await?;
+        let before = self.capture().await?;
         if !self.plan.planned.same_sources(&before) {
             return Err(VerifyError::Blocked(
                 "source drift before verification check".into(),
@@ -287,7 +298,9 @@ impl CheckRunner {
             )
         };
         let spool = self.context.artifacts.clone();
+        let guards = (self.lease.clone(), self.lifetime.clone());
         let (out, err) = tokio::task::spawn_blocking(move || {
+            let _guards = guards;
             Ok::<_, tachyon_tools::ToolError>((
                 receipt
                     .stdout_artifact
@@ -300,7 +313,7 @@ impl CheckRunner {
         .await
         .map_err(|error| VerifyError::Blocked(error.to_string()))?
         .map_err(|error| VerifyError::Blocked(error.to_string()))?;
-        let after = capture(self.context.clone()).await?;
+        let after = self.capture().await?;
         if !self.plan.planned.same_sources(&after) {
             record.status = NodeStatus::Failed;
             record.diagnostic = "source drift during verification command".into();
@@ -316,6 +329,20 @@ pub async fn run(
     plan: VerificationPlan,
     context: Arc<ToolsContext>,
     cancel: CancellationToken,
+) -> Result<VerificationReport, VerifyError> {
+    run_with_lifetime(plan, context, cancel, Arc::new(())).await
+}
+
+/// As [`run`], retaining a caller-owned lifetime guard in actual effect workers.
+///
+/// Core supplies its task-ownership guard here. This opaque anchor conveys no
+/// authorization or completion authority; it only prevents premature owner
+/// release during cancellation/abort cleanup or a blocking snapshot/spool write.
+pub async fn run_with_lifetime(
+    plan: VerificationPlan,
+    context: Arc<ToolsContext>,
+    cancel: CancellationToken,
+    lifetime: Arc<dyn Send + Sync>,
 ) -> Result<VerificationReport, VerifyError> {
     plan.contract.validate()?;
     plan.validate_graph()?;
@@ -335,12 +362,16 @@ pub async fn run(
     // The guard is held through scheduler shutdown and worker drain, so a
     // timed-out scheduler cannot release its grant while its process is
     // still handling TERM and the next run starts early.
-    let lease = acquire_workspace_lease(&actual_root, &cancel).await?;
+    let lease = WorkspaceLease::acquire(&actual_root, &cancel)
+        .await
+        .map_err(blocked)?;
     let plan = Arc::new(plan);
     let worker = Arc::new(CheckRunner {
         plan: plan.clone(),
         context,
         evidence: Mutex::new(BTreeMap::new()),
+        lease: lease.clone(),
+        lifetime,
     });
     let workers = Arc::new(Mutex::new(Workers::default()));
     let scope = cancel.child_token();
@@ -381,7 +412,7 @@ pub async fn run(
         status = scheduler.wait_finished(plan.task_id, Duration::from_millis(budget)) => status.map_err(blocked)?,
     };
     owner.close().await?;
-    let snapshot = capture(worker.context.clone()).await?;
+    let snapshot = worker.capture().await?;
     let records = worker
         .evidence
         .lock()
@@ -420,12 +451,6 @@ pub async fn run(
     })
 }
 
-async fn capture(context: Arc<ToolsContext>) -> Result<WorkspaceSnapshot, VerifyError> {
-    tokio::task::spawn_blocking(move || WorkspaceSnapshot::capture_authorized(&context))
-        .await
-        .map_err(blocked)?
-}
-
 /// Resolves a command cwd to its canonical target and policy scope.
 /// Authorization and execution must both use this resolved target: the
 /// lexical alias may point through a symlink at a denied directory.
@@ -452,39 +477,11 @@ fn resolve_command_target(
     Ok((resolved, scope))
 }
 
-async fn acquire_workspace_lease(
-    root: &Path,
-    cancel: &CancellationToken,
-) -> Result<tokio::sync::OwnedMutexGuard<()>, VerifyError> {
-    tokio::select! {
-        biased;
-        () = cancel.cancelled() => Err(VerifyError::Blocked(
-            "verification cancelled before workspace lease".into(),
-        )),
-        guard = workspace_lock(root).lock_owned() => Ok(guard),
-    }
-}
-
 fn bounded(value: &str) -> String {
     value.chars().take(2_048).collect()
 }
 fn blocked(error: impl std::fmt::Display) -> VerifyError {
     VerifyError::Blocked(error.to_string())
-}
-
-fn workspace_locks() -> &'static std::sync::Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>> {
-    static LOCKS: OnceLock<std::sync::Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>> =
-        OnceLock::new();
-    LOCKS.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
-}
-
-fn workspace_lock(root: &Path) -> Arc<tokio::sync::Mutex<()>> {
-    workspace_locks()
-        .lock()
-        .expect("workspace locks poisoned")
-        .entry(root.to_path_buf())
-        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-        .clone()
 }
 
 struct SchedulerOwner {
@@ -495,32 +492,44 @@ struct SchedulerOwner {
 }
 impl SchedulerOwner {
     async fn close(mut self) -> Result<(), VerifyError> {
-        self.handle.take();
-        if let Some(join) = self.join.as_mut() {
-            join.await.map_err(blocked)?;
+        match self.begin_close() {
+            Some(drain) => drain.await.map_err(blocked)?,
+            None => Ok(()),
         }
-        self.join.take();
+    }
+
+    fn begin_close(&mut self) -> Option<tokio::task::JoinHandle<Result<(), VerifyError>>> {
+        let scheduler = self.join.take()?;
+        self.handle.take();
         self.scope.cancel();
         let mut tasks = {
             let mut workers = self.workers.lock().expect("verification workers poisoned");
             workers.closed = true;
             std::mem::take(&mut workers.tasks)
         };
-        while let Some(result) = tasks.join_next().await {
-            result.map_err(blocked)?;
-        }
-        Ok(())
+        scheduler.abort();
+        // Actual workers retain the lease and opaque owner guard. Aborting the
+        // caller or its close-waiter drops only this JoinHandle, not the drain
+        // job. Never abort the worker JoinSet: processes must finish TERM/KILL
+        // and reap before the next conflicting stage can acquire the lease.
+        Some(tokio::spawn(async move {
+            let mut failure = match scheduler.await {
+                Err(error) if !error.is_cancelled() => Some(blocked(error)),
+                _ => None,
+            };
+            while let Some(result) = tasks.join_next().await {
+                if let Err(error) = result {
+                    failure.get_or_insert_with(|| blocked(error));
+                }
+            }
+            failure.map_or(Ok(()), Err)
+        }))
     }
 }
 impl Drop for SchedulerOwner {
     fn drop(&mut self) {
-        self.scope.cancel();
-        if let Some(join) = &self.join {
-            join.abort();
-        }
-        if let Ok(mut workers) = self.workers.lock() {
-            workers.closed = true;
-            workers.tasks.abort_all();
-        }
+        // A dropped JoinHandle leaves its owned drain job running. Its real
+        // workers, not this wrapper, hold exclusion until cleanup has finished.
+        drop(self.begin_close());
     }
 }

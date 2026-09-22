@@ -69,6 +69,10 @@ async fn forged_node_schema_access_and_retries_cannot_reach_processes() {
             plan: Arc::new(forged_plan),
             context: context.clone(),
             evidence: Mutex::new(BTreeMap::new()),
+            lease: WorkspaceLease::acquire(ws.path(), &CancellationToken::new())
+                .await
+                .unwrap(),
+            lifetime: Arc::new(()),
         };
         let outcome = runner
             .execute_owned(&node, serde_json::Map::new(), CancellationToken::new())

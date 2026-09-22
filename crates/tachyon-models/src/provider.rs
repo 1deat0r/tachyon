@@ -72,15 +72,48 @@ pub enum ModelEvent {
 /// execution critical path; slow consumers drop, correctness never waits.
 pub type ModelEventSink = tokio::sync::mpsc::UnboundedSender<ModelEvent>;
 
+/// Source of token usage, independent of provider identity or counter values.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageProvenance {
+    /// No usage metadata was supplied, including legacy serialized results.
+    #[default]
+    Unknown,
+    /// The provider supplied a usage object; individual counts may be unavailable.
+    ProviderReported,
+    /// Counts came from a deterministic test/replay script, not measured usage.
+    Scripted,
+}
+
+/// Authoritative token-usage availability for one result, never an estimate.
+///
+/// `None` means absent, malformed, or outside the `u32` range; `Some(0)` is an
+/// explicitly supplied zero. Consult provenance before treating a count as
+/// reported usage rather than scripted data. Estimates remain separate in
+/// [`ProviderEstimate`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelUsage {
+    /// Input tokens, if supplied as a valid count.
+    pub input_tokens: Option<u32>,
+    /// Output tokens, if supplied as a valid count.
+    pub output_tokens: Option<u32>,
+    /// Where these counts came from, even when neither count is available.
+    pub provenance: UsageProvenance,
+}
+
 /// The committed outcome of one model call.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ModelResult {
     /// Parsed structured decision.
     pub decision: AgentDecision,
-    /// Billed/observed input tokens, when reported.
+    /// Legacy input counter; use `usage` for availability and provenance.
     pub input_tokens: u32,
-    /// Billed/observed output tokens, when reported.
+    /// Legacy output counter; use `usage` for availability and provenance.
     pub output_tokens: u32,
+    /// Authoritative usage metadata. Legacy results deserialize as unknown,
+    /// regardless of their numeric counters or provider name.
+    #[serde(default)]
+    pub usage: ModelUsage,
     /// Measured wall latency, milliseconds.
     pub latency_ms: f64,
     /// Which provider served the call.

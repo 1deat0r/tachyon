@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Milestone 10: full debugging task (provider-neutral core runtime over
+  evidence/model/mutation/verification, supervisor ownership with
+  ack-after-drain steering, shared workspace lease through durable
+  completion, authorized mutation with scoped recovery, measured
+  auth-refresh benchmark) with R1/R2 code boards unanimous BUILD.
+
 - Milestone 9: verification-gated completion (typed acceptance contracts,
   authorized source snapshots, affected-first Rust planning with
   reverse-dependent closure, validated verification IR through the

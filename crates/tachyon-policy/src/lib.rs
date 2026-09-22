@@ -505,6 +505,28 @@ mod tests {
     }
 
     #[test]
+    fn grant_for_another_operation_cannot_satisfy_this_ask() {
+        // A model-minted approval (granted for the model's own planned
+        // operation) presented for the real operation is denied: approval
+        // binds the exact operation hash, so no output can self-approve.
+        let mut approvals = Approvals::default();
+        let model_op = json!({"batch": "model-minted", "path": "evil.rs"});
+        let model_request = ApprovalRequest {
+            id: ApprovalId::generate(),
+            capability: CapabilityId("mutation.patch".to_owned()),
+            scope: "workspace/evil.rs".to_owned(),
+            operation_hash: operation_hash(&model_op),
+            summary: String::new(),
+        };
+        approvals.decide(model_request.clone(), true);
+        let real_op = json!({"batch": "real-batch-id", "path": "src/a.rs"});
+        assert!(matches!(
+            approvals.resolve(&model_request, &real_op),
+            PolicyDecision::Deny { .. }
+        ));
+    }
+
+    #[test]
     fn material_change_invalidates_approval() {
         let mut approvals = Approvals::default();
         let op = json!({"path": "a", "content": "x"});

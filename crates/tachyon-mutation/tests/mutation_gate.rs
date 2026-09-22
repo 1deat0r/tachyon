@@ -404,10 +404,12 @@ fn sibling_batches_isolated_from_recovery_failure() {
 }
 
 #[test]
-fn sweep_removes_only_engine_tmps() {
+fn legacy_cleanup_preserves_unowned_marker_files() {
     let (ws, state) = fixture("sweep");
     write(&ws, "a.rs", "v1");
     write(&ws, "notes.tachyon-tmp-backup", "user data");
+    // M10: even hidden engine-looking names are user data without ownership.
+    write(&ws, ".operator.tachyon-tmp-keep", "protected");
     #[cfg(unix)]
     std::os::unix::fs::symlink("..", ws.join("loop")).expect("symlink");
     let engine = MutationEngine::open(&ws, &state).expect("open");
@@ -420,6 +422,7 @@ fn sweep_removes_only_engine_tmps() {
     let recovery = engine2.recover(true).expect("recover");
     assert_eq!(read(&ws, "a.rs"), "v2");
     assert_eq!(read(&ws, "notes.tachyon-tmp-backup"), "user data");
+    assert_eq!(read(&ws, ".operator.tachyon-tmp-keep"), "protected");
     assert!(recovery.batch_errors.is_empty());
     std::fs::remove_dir_all(ws.parent().expect("root")).ok();
 }

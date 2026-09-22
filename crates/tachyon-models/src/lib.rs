@@ -51,6 +51,6 @@ pub use openai_compat::{
 };
 pub use provider::{
     BoxFuture, ModelError, ModelEvent, ModelEventSink, ModelProvider, ModelRequest, ModelResult,
-    ProviderEstimate,
+    ModelUsage, ProviderEstimate, UsageProvenance,
 };
 pub use registry::{ModelRegistry, RegisteredProvider, Role, RoleMap, SelectedProvider};

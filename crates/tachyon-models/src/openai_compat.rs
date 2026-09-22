@@ -23,8 +23,8 @@ use tachyon_types::ProviderId;
 
 use crate::{
     AgentDecision, ContextBlock, ContextKind, HistorySpeaker, ModelCapabilities, ModelError,
-    ModelEvent, ModelFeature, ModelProvider, ModelRequest, ModelResult, ProviderEstimate,
-    parse_decision,
+    ModelEvent, ModelFeature, ModelProvider, ModelRequest, ModelResult, ModelUsage,
+    ProviderEstimate, UsageProvenance, parse_decision,
 };
 
 /// Configuration selecting this adapter (operator-owned, never model-chosen).
@@ -293,9 +293,9 @@ fn wire_message(block: &ContextBlock) -> WireMessage {
 
 /// Extracts the assistant text from a `chat/completions` body. Pure and
 /// tested: missing choices or content is `MalformedOutput`, never silently
-/// treated as empty success. Token usage rides along when the server reports
-/// it; absent usage counts as zero, never as an estimate.
-fn parse_completions(body: &str) -> Result<(String, u32, u32), ModelError> {
+/// treated as empty success. Usage metadata is separate from legacy numeric
+/// counters: unavailable counts must not be mistaken for reported zeroes.
+fn parse_completions(body: &str) -> Result<(String, u32, u32, ModelUsage), ModelError> {
     let value: serde_json::Value = serde_json::from_str(body)
         .map_err(|error| ModelError::MalformedOutput(format!("response is not JSON: {error}")))?;
     let content = value
@@ -305,19 +305,32 @@ fn parse_completions(body: &str) -> Result<(String, u32, u32), ModelError> {
         .ok_or_else(|| {
             ModelError::MalformedOutput("response has no choices[0].message.content".to_owned())
         })?;
+    let prompt_tokens = usage_tokens(&value, "prompt_tokens");
+    let completion_tokens = usage_tokens(&value, "completion_tokens");
+    let usage = ModelUsage {
+        input_tokens: prompt_tokens.and_then(|count| u32::try_from(count).ok()),
+        output_tokens: completion_tokens.and_then(|count| u32::try_from(count).ok()),
+        provenance: if value.get("usage").is_some_and(serde_json::Value::is_object) {
+            UsageProvenance::ProviderReported
+        } else {
+            UsageProvenance::Unknown
+        },
+    };
     Ok((
         content,
-        usage_tokens(&value, "prompt_tokens"),
-        usage_tokens(&value, "completion_tokens"),
+        // Keep legacy zero-filling/saturation without claiming those values
+        // were valid reported counts in the authoritative usage metadata.
+        prompt_tokens.map_or(0, |count| u32::try_from(count).unwrap_or(u32::MAX)),
+        completion_tokens.map_or(0, |count| u32::try_from(count).unwrap_or(u32::MAX)),
+        usage,
     ))
 }
 
-/// Reads one usage counter, saturating. Absent or malformed usage is zero.
-fn usage_tokens(value: &serde_json::Value, key: &str) -> u32 {
+/// Reads one raw usage counter. Absent or malformed usage is unavailable.
+fn usage_tokens(value: &serde_json::Value, key: &str) -> Option<u64> {
     value
         .pointer(&format!("/usage/{key}"))
         .and_then(serde_json::Value::as_u64)
-        .map_or(0, |count| u32::try_from(count).unwrap_or(u32::MAX))
 }
 
 /// OpenAI-compatible provider over any [`HttpTransport`].
@@ -407,7 +420,7 @@ impl<T: HttpTransport> ModelProvider for OpenAiCompatProvider<T> {
                 self.config.request_timeout_ms,
             )
             .await?;
-        let (content, prompt_tokens, completion_tokens) = parse_completions(&raw)?;
+        let (content, prompt_tokens, completion_tokens, usage) = parse_completions(&raw)?;
         let decision: AgentDecision = parse_decision(&content)?;
         // Same sink path as the fake: one Delta, then Done. Ephemeral
         // progress may drop; the committed result still returns.
@@ -417,6 +430,7 @@ impl<T: HttpTransport> ModelProvider for OpenAiCompatProvider<T> {
             decision,
             input_tokens: prompt_tokens,
             output_tokens: completion_tokens,
+            usage,
             latency_ms: started.elapsed().as_secs_f64() * 1_000.0,
             provider: self.id.clone(),
             model: self.config.model.clone(),
