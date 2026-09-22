@@ -25,9 +25,13 @@ struct Dirs {
 impl Dirs {
     fn fresh(tag: &str) -> Self {
         let root = std::env::temp_dir().join(format!("tachyon-m10-{tag}-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(root.join("workspace")).unwrap();
+        // Canonicalize once: macOS temp (/var → /private/var) and any other
+        // aliasing must resolve identically everywhere, or canonical engine
+        // paths miss policy scopes built from display strings.
+        let root = std::fs::canonicalize(&root).unwrap();
         let ws = root.join("workspace");
         let state = root.join("mutation-state");
-        std::fs::create_dir_all(&ws).unwrap();
         std::fs::write(ws.join("target.rs"), BEFORE).unwrap();
         Self { root, ws, state }
     }

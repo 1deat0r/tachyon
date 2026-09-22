@@ -21,9 +21,12 @@ impl Fixture {
             "tachyon-scoped-recovery-{}",
             MutationBatchId::generate()
         ));
+        std::fs::create_dir_all(root.join("workspace")).expect("workspace");
+        // Canonicalize once so canonical engine paths and policy scopes
+        // built from display strings agree (macOS /var → /private/var).
+        let root = std::fs::canonicalize(&root).expect("canonical root");
         let ws = root.join("workspace");
         let state = root.join("state");
-        std::fs::create_dir_all(&ws).expect("workspace");
         Self { root, ws, state }
     }
 

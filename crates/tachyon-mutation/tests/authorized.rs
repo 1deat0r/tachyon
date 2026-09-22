@@ -29,9 +29,12 @@ impl Fixture {
             "tachyon-authorized-{}",
             MutationBatchId::generate()
         ));
+        std::fs::create_dir_all(root.join("workspace").join("sub")).expect("workspace");
+        // Canonicalize once so canonical engine paths and policy scopes
+        // built from display strings agree (macOS /var → /private/var).
+        let root = std::fs::canonicalize(&root).expect("canonical root");
         let ws = root.join("workspace");
         let state = root.join("state");
-        std::fs::create_dir_all(ws.join("sub")).expect("workspace");
         std::fs::write(ws.join("a.rs"), BEFORE).expect("source");
         std::fs::write(ws.join("sub/b.rs"), BEFORE).expect("source");
         Self { root, ws, state }
@@ -233,6 +236,7 @@ fn prepare_refuses_alias_escape_and_unnormalized_paths_with_no_effect() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn prepare_refuses_symlinked_sources_and_ancestors_with_no_effect() {
     use std::os::unix::fs::symlink;
