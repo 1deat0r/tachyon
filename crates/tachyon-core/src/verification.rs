@@ -1045,6 +1045,7 @@ mod actor_tests {
         let _serial = hold::SERIAL.lock().await;
         let f = Fixture::new().await;
         let canonical = f.canonical_root();
+        #[allow(unused_mut)]
         let mut aliases = vec![f.root.join("ws/./../ws")];
         #[cfg(unix)]
         {

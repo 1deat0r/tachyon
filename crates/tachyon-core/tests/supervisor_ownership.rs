@@ -117,6 +117,7 @@ async fn awaited_shutdown_releases_owner_but_retained_clones_fail_closed() {
 async fn independent_stores_and_database_aliases_share_admission_before_any_read() {
     let f = Fixture::new().await;
     std::fs::create_dir_all(f.root.join("walk")).unwrap();
+    #[allow(unused_mut)]
     let mut aliases = vec![f.root.clone(), f.root.join("."), f.root.join("walk/..")];
     #[cfg(unix)]
     {

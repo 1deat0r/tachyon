@@ -11,7 +11,7 @@ use crate::{ToolError, ToolsContext, authorize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-#[cfg(any(unix, test))]
+#[cfg(any(unix, windows, test))]
 use tokio::io::AsyncReadExt;
 use tokio_util::sync::CancellationToken;
 
@@ -189,20 +189,191 @@ fn stage_io(stage: &'static str, error: &std::io::Error) -> ToolError {
     ))
 }
 
-#[cfg(not(unix))]
+/// Windows process-tree ownership via Job Objects (spec: "Job Object or
+/// equivalent tree ownership"). The child is assigned to a fresh job with
+/// `KILL_ON_JOB_CLOSE`; every descendant joins the same job unless it holds
+/// breakaway rights, so closing or terminating the job ends the whole tree.
+/// Reaping the owned leader still reserves its PID until `Child::wait`.
+#[cfg(windows)]
+#[allow(unsafe_code)]
 async fn execute(
-    _command: tokio::process::Command,
-    _timeout: Duration,
-    _cancel: CancellationToken,
+    mut command: tokio::process::Command,
+    timeout: Duration,
+    cancel: CancellationToken,
 ) -> Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>), ToolError> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "safe process-tree ownership is unavailable on this platform",
-    )
-    .into())
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
+    };
+    if cancel.is_cancelled() {
+        return Err(ToolError::ProcessCancelled);
+    }
+    command.kill_on_drop(true);
+    let child = command
+        .spawn()
+        .map_err(|error| win_stage_io("spawn", &error))?;
+    // Open our own handle: the leader is unreaped so its PID cannot be
+    // recycled under us. PROCESS_SET_QUOTA + PROCESS_TERMINATE is the
+    // documented access for job assignment.
+    let pid = child.id().expect("newly spawned child has a PID");
+    // SAFETY: `pid` is our live, unreaped child; the handle is owned and
+    // closed below right after assignment.
+    let raw = unsafe { OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid) };
+    if raw.is_null() {
+        return Err(win_stage_io(
+            "open-process",
+            &std::io::Error::last_os_error(),
+        ));
+    }
+    let job = JobObject::create().map_err(|error| win_stage_io("create-job", &error))?;
+    // SAFETY: `raw` is the live handle of our just-spawned child; the job
+    // outlives this call inside `OwnedChild`.
+    let assigned = unsafe { AssignProcessToJobObject(job.handle, raw) };
+    // SAFETY: assignment copied what it needs; our open handle is now excess.
+    unsafe { CloseHandle(raw) };
+    if assigned == 0 {
+        return Err(win_stage_io("assign-job", &std::io::Error::last_os_error()));
+    }
+    let mut owned = OwnedChild { child, job };
+    let stdout = owned.child.stdout.take().ok_or_else(|| {
+        win_stage_io("take-stdout", &std::io::Error::other("missing stdout pipe"))
+    })?;
+    let stderr = owned.child.stderr.take().ok_or_else(|| {
+        win_stage_io("take-stderr", &std::io::Error::other("missing stderr pipe"))
+    })?;
+    let result = tokio::select! {
+        biased;
+        () = cancel.cancelled() => Err(ToolError::ProcessCancelled),
+        () = tokio::time::sleep(timeout) => Err(ToolError::ProcessTimeout(timeout)),
+        output = async {
+            tokio::try_join!(
+                owned.child.wait(),
+                read_stream(stdout),
+                read_stream(stderr)
+            )
+        } => output.map_err(|error| win_stage_io("wait-or-read", &error)),
+    };
+    match result {
+        Ok((status, stdout, stderr)) => {
+            owned
+                .terminate()
+                .await
+                .map_err(|error| win_stage_io("terminate-job", &error))?;
+            Ok((status, stdout, stderr))
+        }
+        Err(error) => {
+            owned
+                .terminate()
+                .await
+                .map_err(|error| win_stage_io("terminate", &error))?;
+            Err(error)
+        }
+    }
 }
 
-#[cfg(any(unix, test))]
+/// Labels an IO failure with the process-lifecycle stage that produced it,
+/// keeping the raw OS code in the message for platform diagnosis.
+#[cfg(windows)]
+fn win_stage_io(stage: &'static str, error: &std::io::Error) -> ToolError {
+    ToolError::Io(std::io::Error::new(
+        error.kind(),
+        format!("{stage} (os error {:?}): {error}", error.raw_os_error()),
+    ))
+}
+
+/// An owned Windows Job Object: closing the last handle kills the tree when
+/// `KILL_ON_JOB_CLOSE` is set, which it always is here.
+#[cfg(windows)]
+struct JobObject {
+    handle: HANDLE,
+}
+
+/// SAFETY: the handle is owned (created by us, closed in `Drop`); only the
+/// owning `OwnedChild` touches it, and all methods take `&self` across awaits
+/// without transferring ownership.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+unsafe impl Send for JobObject {}
+#[cfg(windows)]
+#[allow(unsafe_code)]
+unsafe impl Sync for JobObject {}
+
+#[cfg(windows)]
+#[allow(unsafe_code)]
+impl JobObject {
+    fn create() -> std::io::Result<Self> {
+        // SAFETY: null security/name creates an unnamed job owned by us.
+        let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(std::io::Error::last_os_error());
+        }
+        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        // SAFETY: `info` is a live, aligned struct of the documented size.
+        let set = unsafe {
+            SetInformationJobObject(
+                handle,
+                JobObjectExtendedLimitInformation,
+                (&raw const info).cast(),
+                u32::try_from(std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>())
+                    .expect("job limits struct fits u32"),
+            )
+        };
+        if set == 0 {
+            // SAFETY: the handle is valid and owned; closing exactly once here.
+            unsafe { CloseHandle(handle) };
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(Self { handle })
+    }
+
+    fn terminate(&self) -> std::io::Result<()> {
+        // SAFETY: handle is a valid owned job; exit code is arbitrary.
+        let ended = unsafe { TerminateJobObject(self.handle, 1) };
+        if ended == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+#[allow(unsafe_code)]
+impl Drop for JobObject {
+    fn drop(&mut self) {
+        // KILL_ON_JOB_CLOSE ends the tree as the last handle closes.
+        // SAFETY: valid owned handle, closed exactly once.
+        unsafe { CloseHandle(self.handle) };
+    }
+}
+
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
+#[cfg(windows)]
+use windows_sys::Win32::System::JobObjects::{
+    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+    SetInformationJobObject, TerminateJobObject,
+};
+
+/// Windows tree owner: the job ends every member; the reaped leader's PID is
+/// still reserved by `Child` until waited, as on Unix.
+#[cfg(windows)]
+struct OwnedChild {
+    child: tokio::process::Child,
+    job: JobObject,
+}
+
+#[cfg(windows)]
+impl OwnedChild {
+    /// Best-effort tree kill, then reap the leader. Already-dead trees and
+    /// an already-reaped leader both resolve without error.
+    async fn terminate(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        let _ = self.job.terminate();
+        self.child.wait().await
+    }
+}
+
+#[cfg(any(unix, windows, test))]
 async fn read_stream(mut stream: impl tokio::io::AsyncRead + Unpin) -> std::io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
     stream.read_to_end(&mut bytes).await?;
@@ -273,6 +444,15 @@ fn signal_group(group: libc::pid_t, signal: libc::c_int) -> std::io::Result<()> 
     }
     let error = std::io::Error::last_os_error();
     if error.raw_os_error() == Some(libc::ESRCH) {
+        Ok(())
+    } else if error.raw_os_error() == Some(libc::EPERM) {
+        // macOS reports EPERM (not ESRCH) when the group holds no live,
+        // signalable process — the exited-but-unreaped leader plus, at most,
+        // zombies. Same-UID live members are always signalable, so EPERM
+        // means no worker remains; treating it as fatal would fail every
+        // reaping of an already-exited tree. (setuid-root descendants are
+        // outside the workspace-exclusion threat model: they can escape
+        // containment regardless of signaling.)
         Ok(())
     } else {
         Err(error)
@@ -363,5 +543,23 @@ mod tests {
     async fn stream_read_failure_is_not_successful_empty_output() {
         let result = read_stream(BrokenPipe).await;
         assert!(matches!(result, Err(error) if error.to_string() == "fixture read failure"));
+    }
+
+    /// Signaling an exited leader's group must not error: on macOS the group
+    /// holds no live member and `kill` reports EPERM rather than ESRCH. Pins
+    /// the tolerance so reaping an already-exited tree stays green there.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn exited_group_kill_is_not_an_error() {
+        use std::os::unix::process::CommandExt as _;
+        let mut child = std::process::Command::new("true");
+        child.process_group(0);
+        let mut child = child.spawn().expect("spawn true");
+        let pid = child.id();
+        while !leader_exited(pid).expect("waitid") {
+            tokio::task::yield_now().await;
+        }
+        signal_group(pid as libc::pid_t, libc::SIGKILL).expect("exited group kill");
+        child.wait().expect("reap");
     }
 }
