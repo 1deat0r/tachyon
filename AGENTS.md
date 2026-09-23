@@ -77,3 +77,37 @@ MVP explicitly defers:
 - custom vector database.
 
 Implement these only after the MVP exit gate or an approved ADR.
+
+## Agent skills
+
+### Issue tracker
+
+Issues and specs live on GitHub (`1deat0r/tachyon`) via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Canonical roles: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`; plus `type/*`, `comp/*`, `P0`–`P3`, `needs-repro`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: root `CONTEXT.md` + `docs/adr/`. Always also honor `docs/01_ARCHITECTURE_FREEZE.md`, `docs/02_IMPLEMENTATION_SPEC.md`, and this file. See `docs/agents/domain.md`.
+
+## Delivery workflow (Hermes-grade, 2026-09-24)
+
+Default pipeline for non-trivial work:
+
+1. `/grill-with-docs` (or `/grill-me`) — align intent; update `CONTEXT.md` / ADRs if terms or decisions change.
+2. `/to-spec` or `/to-tickets` — one GitHub issue per bounded slice (or a map + children via `/wayfinder`).
+3. Branch `fix/…` or `feat/…` from a green `main`. One concern per branch/PR.
+4. `/implement` with `/tdd` at agreed seams; local gates before every push:
+   `cargo fmt --check && cargo check --workspace && cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings`
+5. `/code-review` then `/pr` — PR body follows `.github/PULL_REQUEST_TEMPLATE.md`; title is a Conventional Commit; `Fixes #N`.
+6. Squash-merge only when ubuntu + windows + macos CI are green. Delete the branch.
+
+Hard rules:
+
+- Never open a multi-milestone or multi-week PR. Milestones live in GitHub Projects + `PROGRESS.md`, not long-lived branches.
+- CI red = stop the line: issue + tiny fix PR, merge, then resume feature work.
+- Commit messages: `fix|feat|test|chore|refactor|docs(scope): behavior subject` (Conventional Commits).
+- Push commits only after local gates pass (auto-push hook is for green work only).
+- Bare `tachyon` opens the TUI only against a running gateway; document lifecycle changes in the PR, do not silently auto-start the runtime without an explicit design decision.
