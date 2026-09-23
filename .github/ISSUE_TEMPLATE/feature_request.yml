@@ -1,0 +1,25 @@
+name: Feature request
+description: New capability or improvement
+title: "[Feature]: "
+labels: ["type/feature", "needs-triage"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user or system need is unmet? Why can't deterministic code already do it?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: Capability outline (schema, access set, effect class, verification) — see AGENTS.md capability checklist.
+    validations:
+      required: true
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      options:
+        - label: Not in MVP deferred list (AGENTS.md scope discipline) or has an approved ADR

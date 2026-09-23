@@ -1,0 +1,50 @@
+name: Bug report
+description: Something is broken on current main
+title: "[Bug]: "
+labels: ["type/bug", "needs-triage"]
+body:
+  - type: textarea
+    id: repro
+    attributes:
+      label: Repro on current main
+      description: Commands / steps that fail on a fresh clone of main.
+      placeholder: |
+        git clone … && git checkout main
+        cargo test -p … --test … failing_test
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual (log / panic / CI link)
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      placeholder: "ubuntu-latest / windows-latest / macos-latest / local …"
+    validations:
+      required: true
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      options:
+        - P0 — data loss / security / crash loop
+        - P1 — major broken, no workaround
+        - P2 — degraded, workaround exists
+        - P3 — cosmetic
+    validations:
+      required: true
+  - type: input
+    id: comp
+    attributes:
+      label: Component
+      placeholder: "comp/core | comp/gateway | comp/cli | comp/tui | …"
