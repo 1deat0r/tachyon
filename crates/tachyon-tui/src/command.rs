@@ -280,7 +280,10 @@ mod tests {
         let sock = std::env::temp_dir().join(format!("tcm11-{}-{round}.sock", std::process::id()));
         let _ = std::fs::remove_file(&sock);
         let listener = Listener::bind(&sock).expect("mini-gateway binds");
-        let client = CommandClient::connect(&sock).await.expect("connect");
+        // Windows bind derives a named pipe from the parent dir; connect
+        // must use local_address(), not the .sock path (NotFound otherwise).
+        let address = listener.local_address();
+        let client = CommandClient::connect(&address).await.expect("connect");
         let accepted = listener.accept().await.expect("accept");
         let server = tokio::spawn(answer_requests(accepted));
 
