@@ -529,6 +529,12 @@ async fn commit_burst_larger_than_the_broadcast_capacity_loses_nothing() {
     // way to recover is the by-cursor journal pull. (The `Lagged` branch
     // itself is forced and asserted in tachyon-store's
     // `lagged_receiver_catches_up_from_the_journal_by_cursor`.)
+    //
+    // The outbound event queue (256) can also overflow if the client has not
+    // drained yet — the gateway then sends `ResyncRequired`. That is correct
+    // product behavior on a slow subscriber; recover by re-subscribing from
+    // the cursor and folding the ack's replayed tail into the same gapless
+    // set (same contract as `overflow_resyncs_…`).
     let burst = i64::try_from(tachyon_store::COMMIT_NOTIFICATION_CAPACITY)
         .expect("capacity fits i64")
         + 144;
@@ -549,11 +555,33 @@ async fn commit_burst_larger_than_the_broadcast_capacity_loses_nothing() {
         match frame {
             ServerFrame::Event(envelope) => match envelope.event {
                 GatewayEvent::Journal { .. } => received.push(envelope.seq),
+                GatewayEvent::ResyncRequired { after_seq, .. } => {
+                    let again = subscription
+                        .request(Command::Subscribe {
+                            task_id: task_id.parse().unwrap(),
+                            after_seq,
+                        })
+                        .await;
+                    let payload = match again.result {
+                        CommandResult::Ok { payload } => payload,
+                        other @ CommandResult::Err { .. } => {
+                            panic!("re-subscribe must succeed, got {other:?}")
+                        }
+                    };
+                    assert_eq!(payload["after_seq"], after_seq, "resume cursor");
+                    if let Some(events) = payload["events"].as_array() {
+                        for event in events {
+                            received.push(event["seq"].as_i64().expect("event seq"));
+                        }
+                    }
+                }
                 other => panic!("unexpected event {other:?}"),
             },
             ServerFrame::Response(_) => {}
         }
     }
+    received.sort_unstable();
+    received.dedup();
     assert_eq!(
         received,
         (1..=burst).collect::<Vec<i64>>(),
