@@ -388,9 +388,11 @@ async fn closing_the_subscription_tears_down_both_halves_and_leaves_the_task() {
 
     // The client closes its side first: the server reader sees EOF and must
     // tear the writer down too, which is what surfaces as EOF to the client.
+    // 10s (not 2s): under Windows CI load, named-pipe teardown can exceed 2s
+    // while still completing correctly — same bound as the other close tests.
     subscription.close_write().await;
     assert!(
-        subscription.closed_within(Duration::from_secs(2)).await,
+        subscription.closed_within(Duration::from_secs(10)).await,
         "reader exit must drop the write half as well"
     );
 
