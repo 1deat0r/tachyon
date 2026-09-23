@@ -537,9 +537,10 @@ mod provider_tests {
         path
     }
 
-    /// A process env var that exists on every unix test host; stands in for
-    /// a real API key so this test never mutates the process environment.
-    const PRESENT_KEY_ENV: &str = "HOME";
+    /// A process env var that exists on every CI host (unix and
+    /// Windows); stands in for a real API key so this test never
+    /// mutates the process environment. (`HOME` is unset on Windows.)
+    const PRESENT_KEY_ENV: &str = "PATH";
     /// A unique name guaranteed to be unset: used for the missing-variable
     /// refusal without ever touching the environment.
     const ABSENT_KEY_ENV: &str = "TACHYON_TEST_ABSENT_PROVIDER_KEY_M11_C2";
@@ -593,13 +594,13 @@ mod provider_tests {
     #[test]
     fn load_resolves_a_declared_key_from_the_process_environment() {
         // Presence-only assertion: leak assertions live on the pure
-        // path above (HOME legitimately appears in data_dir renderings).
+        // path above (PATH legitimately appears in some Debug renderings).
         let json = format!(
             r#"{{"provider":{{"kind":"openai_compat","base_url":"http://127.0.0.1:11434","model":"llama-3","api_key_env":"{PRESENT_KEY_ENV}"}}}}"#
         );
         let path = write_config(&json);
         let config = Config::load(Some(path), CliOverrides::default()).expect("config loads");
-        assert!(config.provider_key.is_some(), "HOME resolves at load");
+        assert!(config.provider_key.is_some(), "PATH resolves at load");
         assert!(format!("{config:?}").contains("[REDACTED]"));
     }
 
