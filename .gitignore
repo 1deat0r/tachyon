@@ -11,3 +11,12 @@
 *.db
 *.db-shm
 *.db-wal
+
+# Skill installer artifacts (live in ~/.config/opencode/skills, not this repo)
+.agents/
+.agent/
+.claude/
+skills-lock.json
+
+# Skill installer alternate path
+agent/
