@@ -4,9 +4,30 @@ This file is updated by the implementing agent after every milestone.
 
 ## Current milestone
 
-Milestone 11 — next (Milestone 10 complete, see gates below)
+Milestone 12 — next (Milestone 11 complete, see gates below)
 
 ## Completed gates
+
+- 2026-09-23 Milestone 11 — TUI + live gateway events + run path:
+  protocol v2 tagged `ServerFrame` with `Subscribe` streaming (ack +
+  gapless journal replay, bounded queue with last-written resync),
+  `tachyon-tui` Ratatui client (all nine docs/04 panes, honest empty
+  states), CLI `attach` + `run`/`ps`/`pause`/`resume`/`cancel` aliases,
+  operator provider config with redaction, supervisor-owned `StartRun`
+  on the shared driver (example refactored onto it), five new journal
+  kinds, approval wait with one-shot durable grants, run-held workspace
+  lease with inner reuse + `workspace_busy` refusal, detected Cargo
+  acceptance. Gate: disconnect/close leaves tasks untouched; reconnect
+  replays gapless (protocol + TUI-client legs). Parent-fixed stale-handle
+  `supervisor_gone` race with regression. G7: commit→frame n=200
+  p50 ~259µs / p95 ~311µs (<50ms PASS; run-to-run variance, both this
+  and the prior ~272/~362 run pass). Tests: 86 suites, 466 passed /
+  0 failed default (474 all-features); `fmt`, `check`, strict `clippy`
+  clean both feature sets. Plan r4 unanimous BUILD; code G8 R1:
+  2×BUILD+2×CONDITIONAL+1×REJECT → ten blockers fixed or amended;
+  R2: 2×BUILD+2×CONDITIONAL (closures landed: recovery-election
+  ordering, stale pin-then-lease doc order, amendment wording), seat5
+  pending. Report: `docs/milestones/M11_REPORT.md`.
 
 - 2026-09-22 Milestone 10 — Full debugging task: provider-neutral core
   runtime joining evidence, model, recoverable mutation and supervisor-owned

@@ -8,8 +8,9 @@ genuine unresolved uncertainty.
 
 > LLMs are reasoning accelerators, not Tachyon's operating system.
 
-**Status (Sep 2026):** early implementation. Milestone 10
-(full debugging task) is done and gated; see [`PROGRESS.md`](PROGRESS.md). Not yet a daily
+**Status (Sep 2026):** early implementation. Milestone 11
+(TUI + live gateway events + run path) is implemented, code board pending;
+see [`PROGRESS.md`](PROGRESS.md). Not yet a daily
 driver — watch this repo if the architecture interests you.
 
 ## Quickstart
@@ -25,6 +26,7 @@ In one shell, start the runtime; in another, drive it:
 
 ```bash
 tachyon gateway
+tachyon                # bare invocation opens the TUI (attach)
 tachyon session create
 tachyon task create --session <SESSION_ID> "Where is refreshToken defined and used?"
 tachyon task list

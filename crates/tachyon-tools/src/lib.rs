@@ -59,6 +59,13 @@ pub struct ToolsContext {
     pub approvals: Approvals,
     pub artifacts: artifact::ArtifactSpool,
     pub credentials: credential::CredentialBroker,
+    /// M11 slice 1: the run-held workspace lease, attached by hosts that
+    /// took the lease on the pinned canonical root before spawning a run
+    /// (gateway `StartRun` prepare). Private on purpose: drive-reachable
+    /// inner acquisitions must go through [`ToolsContext::workspace_lease`]
+    /// and reuse this guard — the lock is not reentrant, so a second
+    /// acquisition on the same root would self-deadlock.
+    held_lease: Option<workspace::WorkspaceLease>,
 }
 
 impl ToolsContext {
@@ -79,7 +86,49 @@ impl ToolsContext {
             approvals: Approvals::default(),
             artifacts,
             credentials: credential::CredentialBroker::default(),
+            held_lease: None,
         }
+    }
+
+    /// Single-source constructor (M11 slice 5): the caller already
+    /// canonicalized the root (gateway `StartRun` prepare step 3, which
+    /// also pins it durably), so this value IS the policy, evidence and
+    /// mutation root — NO filesystem resolution happens here. A second
+    /// `canonicalize` across the pin round-trip would be an await window
+    /// where the policy root could diverge from the durable pin; this
+    /// constructor makes that divergence impossible by construction.
+    #[must_use]
+    pub fn new_from_canonical(
+        workspace_root: PathBuf,
+        policy: Policy,
+        artifacts: artifact::ArtifactSpool,
+    ) -> Self {
+        Self {
+            workspace_root,
+            policy,
+            approvals: Approvals::default(),
+            artifacts,
+            credentials: credential::CredentialBroker::default(),
+            held_lease: None,
+        }
+    }
+
+    /// Attaches the run-held workspace lease. The guard's lifetime is the
+    /// context's: every stage the run reaches through this context is
+    /// protected, and the lease releases when the last holder drops it.
+    #[must_use]
+    pub fn with_workspace_lease(mut self, lease: workspace::WorkspaceLease) -> Self {
+        self.held_lease = Some(lease);
+        self
+    }
+
+    /// The lease this context carries, if any. Inner workspace stages
+    /// (verification capture/plan, the verify runner) must clone this
+    /// guard instead of acquiring: the registry lock is per-canonical-root
+    /// and NOT reentrant.
+    #[must_use]
+    pub fn workspace_lease(&self) -> Option<&workspace::WorkspaceLease> {
+        self.held_lease.as_ref()
     }
 }
 
@@ -134,6 +183,41 @@ pub fn authorize(
     operation: &serde_json::Value,
     summary: &str,
 ) -> Result<(), ToolError> {
+    authorize_inner(
+        policy, approvals, capability, scope, operation, summary, false,
+    )
+}
+
+/// [`authorize`] for a PRE-EFFECT gate (M11): identical policy decision
+/// and identical typed ask, but a present one-shot grant is SATISFIED
+/// without being consumed — the grant's single use stays available for
+/// the per-effect recheck that actually mutates. Without this split a
+/// gate that re-runs after each grant burns the grant of every earlier
+/// checked operation and the run re-parks exponentially instead of
+/// proceeding on exactly-one re-run.
+pub fn authorize_peek(
+    policy: &Policy,
+    approvals: &Approvals,
+    capability: &str,
+    scope: &str,
+    operation: &serde_json::Value,
+    summary: &str,
+) -> Result<(), ToolError> {
+    authorize_inner(
+        policy, approvals, capability, scope, operation, summary, true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn authorize_inner(
+    policy: &Policy,
+    approvals: &Approvals,
+    capability: &str,
+    scope: &str,
+    operation: &serde_json::Value,
+    summary: &str,
+    peek: bool,
+) -> Result<(), ToolError> {
     let capability_id = CapabilityId(capability.to_owned());
     match policy.decide(&capability_id, scope, operation, summary) {
         PolicyDecision::Allow => Ok(()),
@@ -142,18 +226,25 @@ pub fn authorize(
             scope: scope.to_owned(),
             reason,
         }),
-        PolicyDecision::Ask { request } => match approvals.resolve(&request, operation) {
-            PolicyDecision::Allow => Ok(()),
-            PolicyDecision::Deny { reason } => Err(ToolError::Denied {
-                capability: capability.to_owned(),
-                scope: scope.to_owned(),
-                reason,
-            }),
-            PolicyDecision::Ask { request } => Err(ToolError::ApprovalRequired {
-                capability: capability.to_owned(),
-                scope: scope.to_owned(),
-                request: Box::new(request),
-            }),
-        },
+        PolicyDecision::Ask { request } => {
+            let resolution = if peek {
+                approvals.resolve_peek(&request, operation)
+            } else {
+                approvals.resolve(&request, operation)
+            };
+            match resolution {
+                PolicyDecision::Allow => Ok(()),
+                PolicyDecision::Deny { reason } => Err(ToolError::Denied {
+                    capability: capability.to_owned(),
+                    scope: scope.to_owned(),
+                    reason,
+                }),
+                PolicyDecision::Ask { request } => Err(ToolError::ApprovalRequired {
+                    capability: capability.to_owned(),
+                    scope: scope.to_owned(),
+                    request: Box::new(request),
+                }),
+            }
+        }
     }
 }

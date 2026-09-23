@@ -11,6 +11,7 @@ async-trait = { workspace = true }
 tachyon-ir = { workspace = true }
 tachyon-scheduler = { path = "../tachyon-scheduler" }
 tachyon-tools = { path = "../tachyon-tools" }
+tachyon-policy = { path = "../tachyon-policy" }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 serde = { workspace = true }
@@ -20,7 +21,6 @@ thiserror = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
-tachyon-policy = { path = "../tachyon-policy" }
 [target.'cfg(unix)'.dev-dependencies]
 libc = "0.2"
 

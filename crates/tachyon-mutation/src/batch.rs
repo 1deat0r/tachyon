@@ -161,6 +161,12 @@ pub enum MutationError {
     /// Journal tail corrupt beyond the torn-write repair.
     #[error("mutation journal corrupt at line {0}")]
     JournalCorrupt(usize),
+    /// The policy asked for a human decision before this exact operation
+    /// may proceed (M11 typed parking). Surfaced typed so a
+    /// supervisor-owned run parks instead of failing; carries the pending
+    /// approval request itself.
+    #[error("approval required for {} on {}", .0.capability.0, .0.scope)]
+    ApprovalRequired(tachyon_policy::ApprovalRequest),
 }
 
 impl MutationError {
@@ -179,7 +185,8 @@ impl MutationError {
             | Self::AlreadyCompleted(_)
             | Self::InvalidPath(_)
             | Self::RecoveryBlocked(_)
-            | Self::JournalCorrupt(_) => false,
+            | Self::JournalCorrupt(_)
+            | Self::ApprovalRequired(_) => false,
         }
     }
 }

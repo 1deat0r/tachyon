@@ -17,7 +17,8 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use tachyon_protocol::Command;
+use tachyon_gateway::FAKE_PROVIDER_LABEL;
+use tachyon_protocol::{Command, CommandResult};
 
 use client::{render, send};
 use config::{CliOverrides, Config};
@@ -26,7 +27,6 @@ use doctor::{all_ok, run_checks};
 /// Tachyon: high-performance AI agent harness.
 #[derive(Debug, Parser)]
 #[command(name = "tachyon", version, about)]
-#[command(arg_required_else_help = true)]
 struct Cli {
     /// Config file path. Overrides `TACHYON_CONFIG` and the default path.
     #[arg(long, env = "TACHYON_CONFIG")]
@@ -43,9 +43,9 @@ struct Cli {
     /// Prints machine-readable JSON instead of human lines.
     #[arg(long, global = true)]
     json: bool,
-    /// Subcommand to run.
+    /// Subcommand to run; bare `tachyon` opens the TUI (`attach`).
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 /// Subcommands. `gateway` runs the runtime; `session`/`task` are clients.
@@ -68,6 +68,42 @@ enum Commands {
         /// Task action.
         #[command(subcommand)]
         action: TaskAction,
+    },
+    /// Starts a run: session + task + `StartRun` round trips, plumbing
+    /// to the gateway's shared driver (no agent logic lives here).
+    Run {
+        /// Workspace root pinned by the gateway (canonicalized there);
+        /// defaults to the current directory.
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+        /// Explicit acceptance contract JSON file; wins over detection.
+        #[arg(long)]
+        acceptance: Option<PathBuf>,
+        /// User's objective; the remaining words are joined.
+        objective: Vec<String>,
+    },
+    /// Lists tasks as a human-readable table (`--json` keeps JSON).
+    Ps,
+    /// Opens the TUI against the running gateway, optionally on a task.
+    Attach {
+        /// Task id to attach to.
+        #[arg(long)]
+        task: Option<String>,
+    },
+    /// Pauses a task (alias of `tachyon task pause`).
+    Pause {
+        /// Task id.
+        task_id: String,
+    },
+    /// Resumes a paused task (alias of `tachyon task resume`).
+    Resume {
+        /// Task id.
+        task_id: String,
+    },
+    /// Cancels a task (alias of `tachyon task cancel`).
+    Cancel {
+        /// Task id.
+        task_id: String,
     },
 }
 
@@ -140,6 +176,11 @@ fn main() -> ExitCode {
     }
 }
 
+/// Bare `tachyon` (spec §38's first-class command) opens the TUI picker.
+fn resolve_command(command: Option<Commands>) -> Commands {
+    command.unwrap_or(Commands::Attach { task: None })
+}
+
 /// Runs the CLI. Returns `Ok(false)` for check/command failures; hard
 /// errors (unreadable config, no gateway) are `Err`.
 fn run() -> Result<bool> {
@@ -152,7 +193,7 @@ fn run() -> Result<bool> {
     let config = Config::load(cli.config, overrides).context("loading configuration")?;
     logging::init_tracing(&config.log_level);
     let json = cli.json;
-    match cli.command {
+    match resolve_command(cli.command) {
         Commands::Doctor => run_doctor(&config, json),
         Commands::Config => run_config(&config, json),
         Commands::Gateway => run_gateway(&config),
@@ -160,6 +201,17 @@ fn run() -> Result<bool> {
             action: SessionAction::Create,
         } => run_session(&config, json),
         Commands::Task { action } => run_task(&config, action, json),
+        Commands::Run {
+            workspace,
+            acceptance,
+            objective,
+        } => run_run(&config, workspace, acceptance, objective.join(" "), json),
+        Commands::Ps => run_ps(&config, json),
+        Commands::Attach { task } => run_attach(&config, task),
+        // Top-level aliases: same TaskAction machinery, same commands.
+        Commands::Pause { task_id } => run_task(&config, TaskAction::Pause { task_id }, json),
+        Commands::Resume { task_id } => run_task(&config, TaskAction::Resume { task_id }, json),
+        Commands::Cancel { task_id } => run_task(&config, TaskAction::Cancel { task_id }, json),
     }
 }
 
@@ -199,14 +251,15 @@ fn runtime() -> Result<tokio::runtime::Runtime> {
 }
 
 fn socket_path(config: &Config) -> Result<PathBuf> {
-    let info = tachyon_gateway::read_endpoint_info(&config.data_dir.join("gateway.json"))
-        .context("reading gateway endpoint (is the gateway running?)")?;
+    let info = tachyon_gateway::read_endpoint_info(&config.data_dir.join("gateway.json")).context(
+        "reading gateway endpoint (is the gateway running? start it with `tachyon gateway`)",
+    )?;
     Ok(info.socket_path)
 }
 
 fn run_gateway(config: &Config) -> Result<bool> {
     runtime()?.block_on(async {
-        let gateway = tachyon_gateway::start(&config.data_dir)
+        let gateway = tachyon_gateway::start_with(&config.data_dir, config.gateway_runtime())
             .await
             .context("starting gateway")?;
         println!("gateway listening on {}", gateway.socket_path().display());
@@ -224,6 +277,115 @@ fn run_session(config: &Config, json: bool) -> Result<bool> {
     runtime()?.block_on(async {
         let result = send(&address, Command::CreateSession).await?;
         render(&result, json)
+    })
+}
+
+/// Unwraps a successful command result; typed gateway refusals become
+/// honest errors (e.g. `provider_not_configured` before any work).
+fn expect_ok(result: Result<CommandResult>, doing: &str) -> Result<serde_json::Value> {
+    match result? {
+        CommandResult::Ok { payload } => Ok(payload),
+        CommandResult::Err { code, message } => {
+            anyhow::bail!("gateway refused {doing}: {code}: {message}")
+        }
+    }
+}
+
+/// `tachyon run`: session + task + `StartRun` round trips. Plumbing
+/// only — the gateway validates the workspace, pins it, and spawns the
+/// ONE shared driver; this binary owns no agent decision logic.
+fn run_run(
+    config: &Config,
+    workspace: Option<PathBuf>,
+    acceptance: Option<PathBuf>,
+    objective: String,
+    json: bool,
+) -> Result<bool> {
+    if objective.trim().is_empty() {
+        anyhow::bail!("OBJECTIVE is required");
+    }
+    let address = socket_path(config)?;
+    let workspace = match workspace {
+        Some(path) => path,
+        None => std::env::current_dir().context("resolving current directory")?,
+    };
+    // Plan item 5/CLI: the fake provider announces its label honestly.
+    if !json && config.provider.as_ref().is_some_and(|p| p.kind == "fake") {
+        println!("provider: {FAKE_PROVIDER_LABEL}");
+    }
+    runtime()?.block_on(async move {
+        let session = expect_ok(
+            send(&address, Command::CreateSession).await,
+            "creating a session",
+        )?;
+        let session_id = session["session_id"]
+            .as_str()
+            .context("gateway returned no session id")?
+            .to_owned();
+        let task = expect_ok(
+            send(
+                &address,
+                Command::CreateTask {
+                    session_id: session_id.parse()?,
+                    objective,
+                },
+            )
+            .await,
+            "creating the task",
+        )?;
+        let task_id = task["task_id"]
+            .as_str()
+            .context("gateway returned no task id")?
+            .to_owned();
+        let result = send(
+            &address,
+            Command::StartRun {
+                task_id: task_id.parse()?,
+                workspace_root: workspace.display().to_string(),
+                acceptance: acceptance.map(|path| path.display().to_string()),
+            },
+        )
+        .await?;
+        render(&result, json)
+    })
+}
+
+/// `tachyon ps`: `ListTasks` rendered as a human table.
+fn run_ps(config: &Config, json: bool) -> Result<bool> {
+    let address = socket_path(config)?;
+    runtime()?.block_on(async move {
+        let result = send(&address, Command::ListTasks { session_id: None }).await?;
+        if json {
+            return render(&result, json);
+        }
+        match &result {
+            CommandResult::Ok { payload } => {
+                let tasks = payload["tasks"].as_array().cloned().unwrap_or_default();
+                println!("{:<38} {:<14} OBJECTIVE", "TASK ID", "STATUS");
+                for task in &tasks {
+                    let id = task["id"].as_str().unwrap_or("-");
+                    let status = task["status"].as_str().unwrap_or("-");
+                    let objective = task["objective"].as_str().unwrap_or("");
+                    let objective: String = objective.chars().take(48).collect();
+                    println!("{id:<38} {status:<14} {objective}");
+                }
+                Ok(true)
+            }
+            CommandResult::Err { .. } => render(&result, json),
+        }
+    })
+}
+
+/// `tachyon attach`: endpoint-info read, then the frozen TUI entrypoint.
+fn run_attach(config: &Config, task: Option<String>) -> Result<bool> {
+    let address = socket_path(config)?;
+    runtime()?.block_on(async move {
+        // Frozen writer-B entrypoint: `AttachOptions.task_id` is the raw
+        // string; the TUI produces its own typed parse error.
+        tachyon_tui::run(&address, tachyon_tui::AttachOptions { task_id: task })
+            .await
+            .map_err(|err| anyhow::anyhow!("tui: {err}"))?;
+        Ok(true)
     })
 }
 
@@ -274,4 +436,167 @@ fn parse_task(raw: &str) -> Result<tachyon_types::TaskId> {
     uuid::Uuid::parse_str(raw)
         .map(tachyon_types::TaskId)
         .with_context(|| format!("invalid task id {raw:?}"))
+}
+
+/// M11 writer C: the new surface parses — `run`/`ps`/`attach` and the
+/// top-level `pause`/`resume`/`cancel` aliases — while every existing
+/// `task` subcommand keeps parsing exactly as before.
+#[cfg(test)]
+mod cli_surface_parse {
+    use clap::Parser;
+
+    use super::{Cli, Commands, TaskAction};
+
+    #[test]
+    fn run_parses_workspace_acceptance_and_objective() {
+        let cli = Cli::try_parse_from([
+            "tachyon",
+            "run",
+            "--workspace",
+            "/tmp/ws",
+            "--acceptance",
+            "/tmp/acc.json",
+            "fix",
+            "the",
+            "login",
+            "bug",
+        ])
+        .expect("run parses");
+        match cli.command.expect("run subcommand") {
+            Commands::Run {
+                workspace,
+                acceptance,
+                objective,
+            } => {
+                assert_eq!(
+                    workspace.map(|p| p.display().to_string()),
+                    Some("/tmp/ws".to_owned())
+                );
+                assert_eq!(
+                    acceptance.map(|p| p.display().to_string()),
+                    Some("/tmp/acc.json".to_owned())
+                );
+                assert_eq!(objective.join(" "), "fix the login bug");
+            }
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_defaults_workspace_and_acceptance_to_none() {
+        let cli = Cli::try_parse_from(["tachyon", "run", "just", "do", "it"]).expect("run parses");
+        match cli.command.expect("run subcommand") {
+            Commands::Run {
+                workspace,
+                acceptance,
+                objective,
+            } => {
+                assert!(workspace.is_none());
+                assert!(acceptance.is_none());
+                assert_eq!(objective.join(" "), "just do it");
+            }
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ps_parses() {
+        let cli = Cli::try_parse_from(["tachyon", "ps"]).expect("ps parses");
+        assert!(matches!(cli.command, Some(Commands::Ps)));
+    }
+
+    #[test]
+    fn bare_invocation_defaults_to_the_tui() {
+        let cli = Cli::try_parse_from(["tachyon"]).expect("bare tachyon parses");
+        assert!(
+            matches!(
+                super::resolve_command(cli.command),
+                Commands::Attach { task: None }
+            ),
+            "bare tachyon must open the TUI picker (attach)"
+        );
+    }
+
+    #[test]
+    fn attach_parses_with_optional_task() {
+        let cli = Cli::try_parse_from(["tachyon", "attach"]).expect("attach parses");
+        match cli.command.expect("attach subcommand") {
+            Commands::Attach { task } => assert!(task.is_none()),
+            other => panic!("expected Attach, got {other:?}"),
+        }
+        let cli = Cli::try_parse_from([
+            "tachyon",
+            "attach",
+            "--task",
+            "0193f0c2-0000-7000-8000-000000000000",
+        ])
+        .expect("attach with task parses");
+        match cli.command.expect("attach subcommand") {
+            Commands::Attach { task } => {
+                assert_eq!(
+                    task.as_deref(),
+                    Some("0193f0c2-0000-7000-8000-000000000000")
+                );
+            }
+            other => panic!("expected Attach, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pause_resume_cancel_are_top_level_commands() {
+        for (word, expect) in [
+            ("pause", "pause"),
+            ("resume", "resume"),
+            ("cancel", "cancel"),
+        ] {
+            let cli =
+                Cli::try_parse_from(["tachyon", word, "0193f0c2-0000-7000-8000-000000000000"])
+                    .unwrap_or_else(|err| panic!("{word} parses: {err}"));
+            let ok = match cli.command.expect("alias subcommand") {
+                Commands::Pause { .. } => expect == "pause",
+                Commands::Resume { .. } => expect == "resume",
+                Commands::Cancel { .. } => expect == "cancel",
+                other => panic!("unexpected command for {word}: {other:?}"),
+            };
+            assert!(ok, "{word} mapped wrong");
+        }
+    }
+
+    #[test]
+    fn every_existing_task_subcommand_still_parses() {
+        let id = "0193f0c2-0000-7000-8000-000000000000";
+        let session = "0193f0c2-0000-7000-8000-000000000001";
+        for args in [
+            vec![
+                "tachyon",
+                "task",
+                "create",
+                "--session",
+                session,
+                "objective",
+            ],
+            vec!["tachyon", "task", "list"],
+            vec!["tachyon", "task", "get", id],
+            vec!["tachyon", "task", "send", id, "hello", "world"],
+            vec!["tachyon", "task", "pause", id],
+            vec!["tachyon", "task", "resume", id],
+            vec!["tachyon", "task", "cancel", id],
+        ] {
+            let cli = Cli::try_parse_from(&args)
+                .unwrap_or_else(|err| panic!("{args:?} still parses: {err}"));
+            assert!(
+                matches!(cli.command, Some(Commands::Task { .. })),
+                "{args:?} must stay a task subcommand"
+            );
+        }
+        // The alias helpers map onto the same TaskAction machinery.
+        let action = super::task_command(TaskAction::Pause {
+            task_id: id.to_owned(),
+        })
+        .unwrap();
+        assert!(matches!(
+            action,
+            tachyon_protocol::Command::PauseTask { .. }
+        ));
+    }
 }

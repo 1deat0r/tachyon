@@ -116,6 +116,11 @@ struct CheckRunner {
     evidence: Mutex<BTreeMap<NodeId, CheckEvidence>>,
     lease: WorkspaceLease,
     lifetime: Arc<dyn Send + Sync>,
+    /// M11 typed parking: the first policy ask observed by a check node,
+    /// kept typed (the node itself can only fail) so `run_with_lifetime`
+    /// aborts the whole run with the request instead of recording a
+    /// failed check. Set exactly once per parked ask.
+    asked: Mutex<Option<tachyon_policy::ApprovalRequest>>,
 }
 
 #[derive(Default)]
@@ -194,6 +199,14 @@ impl CheckRunner {
                 }
             }
             Err(error) => {
+                // M11 typed parking: stash the ask typed so
+                // `run_with_lifetime` aborts with the request; the node
+                // outcome itself can only be a failure. Every other
+                // error stays the failed check it was.
+                if let VerifyError::ApprovalRequired(request) = &error {
+                    *self.asked.lock().expect("verification ask slot poisoned") =
+                        Some(request.clone());
+                }
                 evidence.diagnostic = bounded(&error.to_string());
                 NodeOutcome::failed(evidence.diagnostic.clone(), started.elapsed())
             }
@@ -248,18 +261,7 @@ impl CheckRunner {
         }
         command.validate()?;
         let (resolved, scope) = resolve_command_target(&self.context, command)?;
-        tachyon_tools::authorize(
-            &self.context.policy,
-            &self.context.approvals,
-            "verify.command",
-            &scope,
-            &serde_json::json!({
-                "invocation": node.invocation.args,
-                "resolved_scope": scope,
-            }),
-            "execute required verification command",
-        )
-        .map_err(blocked)?;
+        verify_command_authorized(&self.context, &scope, &node.invocation.args)?;
         let spec = ProcessSpec {
             program: command.program.clone(),
             args: command.args.clone(),
@@ -337,6 +339,33 @@ pub async fn run(
 ///
 /// Core supplies its task-ownership guard here. This opaque anchor conveys no
 /// authorization or completion authority; it only prevents premature owner
+/// The workspace lease for one verification run (M11 slice 1). A run
+/// path that took the lease on its pinned root at `StartRun` prepare
+/// carries it on the context and must get it back: the per-root registry
+/// lock is NOT reentrant, so re-acquiring the run-held root here would
+/// self-deadlock the run. Contexts without an attached lease keep the
+/// stage-local acquisition. The root must equal the caller's canonical
+/// root (prepare root-checked it against the durable pin; the caller
+/// checked it against the baseline) — anything else fails closed.
+async fn run_workspace_lease(
+    context: &ToolsContext,
+    actual_root: &Path,
+    cancel: &CancellationToken,
+) -> Result<WorkspaceLease, VerifyError> {
+    let lease = match context.workspace_lease().cloned() {
+        Some(run_lease) => run_lease,
+        None => WorkspaceLease::acquire(actual_root, cancel)
+            .await
+            .map_err(blocked)?,
+    };
+    if lease.root() != actual_root {
+        return Err(VerifyError::Blocked(
+            "workspace lease root differs from the verification root".into(),
+        ));
+    }
+    Ok(lease)
+}
+
 /// release during cancellation/abort cleanup or a blocking snapshot/spool write.
 pub async fn run_with_lifetime(
     plan: VerificationPlan,
@@ -346,10 +375,7 @@ pub async fn run_with_lifetime(
 ) -> Result<VerificationReport, VerifyError> {
     plan.contract.validate()?;
     plan.validate_graph()?;
-    let context_root = context.workspace_root.clone();
-    let actual_root = tokio::task::spawn_blocking(move || context_root.canonicalize())
-        .await
-        .map_err(blocked)??;
+    let actual_root = canonical_root(context.workspace_root.clone()).await?;
     if actual_root != plan.baseline.root() {
         return Err(VerifyError::Blocked(
             "verification context root differs from baseline".into(),
@@ -362,9 +388,7 @@ pub async fn run_with_lifetime(
     // The guard is held through scheduler shutdown and worker drain, so a
     // timed-out scheduler cannot release its grant while its process is
     // still handling TERM and the next run starts early.
-    let lease = WorkspaceLease::acquire(&actual_root, &cancel)
-        .await
-        .map_err(blocked)?;
+    let lease = run_workspace_lease(&context, &actual_root, &cancel).await?;
     let plan = Arc::new(plan);
     let worker = Arc::new(CheckRunner {
         plan: plan.clone(),
@@ -372,6 +396,7 @@ pub async fn run_with_lifetime(
         evidence: Mutex::new(BTreeMap::new()),
         lease: lease.clone(),
         lifetime,
+        asked: Mutex::new(None),
     });
     let workers = Arc::new(Mutex::new(Workers::default()));
     let scope = cancel.child_token();
@@ -412,6 +437,9 @@ pub async fn run_with_lifetime(
         status = scheduler.wait_finished(plan.task_id, Duration::from_millis(budget)) => status.map_err(blocked)?,
     };
     owner.close().await?;
+    if let Some(request) = take_asked(&worker) {
+        return Err(VerifyError::ApprovalRequired(request));
+    }
     let snapshot = worker.capture().await?;
     let records = worker
         .evidence
@@ -482,6 +510,58 @@ fn bounded(value: &str) -> String {
 }
 fn blocked(error: impl std::fmt::Display) -> VerifyError {
     VerifyError::Blocked(error.to_string())
+}
+
+/// Enforces `verify.command` policy for one acceptance command. M11
+/// typed parking: an ask keeps its exact pending request typed all the
+/// way to the driver (the run parks instead of failing a check); only
+/// non-approval failures collapse to the stringy guard.
+fn verify_command_authorized(
+    context: &ToolsContext,
+    scope: &str,
+    invocation: &serde_json::Value,
+) -> Result<(), VerifyError> {
+    tachyon_tools::authorize(
+        &context.policy,
+        &context.approvals,
+        "verify.command",
+        scope,
+        &serde_json::json!({
+            "invocation": invocation,
+            "resolved_scope": scope,
+        }),
+        "execute required verification command",
+    )
+    .map_err(|error| match error {
+        tachyon_tools::ToolError::ApprovalRequired { request, .. } => {
+            VerifyError::ApprovalRequired(*request)
+        }
+        other => blocked(other),
+    })
+}
+
+/// Canonicalizes the verification root off the async executor; a failed
+/// canonicalize is a blocked verification.
+async fn canonical_root(root: PathBuf) -> Result<PathBuf, VerifyError> {
+    Ok(tokio::task::spawn_blocking(move || root.canonicalize())
+        .await
+        .map_err(blocked)??)
+}
+
+/// M11 typed parking: takes the first policy ask a check node observed
+/// (see [`CheckRunner::asked`]). `run_with_lifetime` calls this after
+/// the scheduler is closed so the typed request aborts the run with the
+/// same cleanup as the success path — scope/workers drop with the
+/// return, and a stage-local (non-run) lease guard drops here. On a run
+/// path the driver's `ParkedJob.context` keeps the run-scoped lease for
+/// the whole wait, so exclusion persists until decision or cancel
+/// (held-whole-run is the M11 contract — R2 seat3 observation).
+fn take_asked(worker: &CheckRunner) -> Option<tachyon_policy::ApprovalRequest> {
+    worker
+        .asked
+        .lock()
+        .expect("verification ask slot poisoned")
+        .take()
 }
 
 struct SchedulerOwner {

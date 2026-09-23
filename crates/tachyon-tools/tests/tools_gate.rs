@@ -38,7 +38,7 @@ fn workspace_local_read_write_automatic() {
 #[test]
 fn outside_workspace_write_needs_approval() {
     let root = scratch("outside");
-    let mut context = test_context(&root);
+    let context = test_context(&root);
     let outside = root
         .join("..")
         .join(format!("tachyon-m3-ext-{}", std::process::id()));

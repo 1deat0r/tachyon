@@ -2,25 +2,25 @@
 //!
 //! This example contains no agent decision logic. It constructs trusted
 //! inputs (fixture copy, policy, acceptance contract) and a scripted
-//! test/replay provider, then runs the production path:
-//! evidence -> model -> patch -> verification. Scripted responses prove
-//! runtime integration and verification, never model reasoning quality.
-//!
+//! test/replay provider, then runs the ONE shared production driver
+//! (`tachyon_core::driver::drive`): evidence -> model -> patch ->
+//! verification. Scripted responses prove runtime integration and
+//! verification, never model reasoning quality.
 //! Modes: `full` (concurrent evidence, supervisor path), `serial`
 //! (sequential evidence, supervisor path, records concurrency 1),
-//! `reference` (same provider/operations/acceptance, serial control loop,
-//! NOT the supervisor path). Any other mode reports `unimplemented`.
+//! `reference` (same shared steps through the driver with no task and no
+//! journal — the declared control group, serial control loop; this host
+//! runs verification itself). Any other mode reports `unimplemented`.
 //! No-speculation/no-judgment configurations coincide with `full` in this
 //! slice: no speculative or Jev stage exists, so no difference is reported.
 //!
-//! ORCHESTRATION NOTE: this host is a single-attempt scripted driver, not a
-//! second orchestration implementation. It calls the trusted start/gate
-//! helpers and the M8 engine directly for one scripted repair, with the
-//! supervisor owning lifecycle, verification and completion. There is no
-//! competing writer: the process-wide ownership guard admits exactly one
-//! supervisor per (`state-database path`, `TaskId`), and the run holds no second
-//! actor. A future multi-attempt runtime must route proposals through the
-//! supervisor actor path instead of extending this driver.
+//! ORCHESTRATION NOTE: there is exactly one orchestration implementation
+//! in this workspace — the shared core driver. This host only builds
+//! trusted inputs and reads its outcome back into a JSON report. For the
+//! supervisor path the driver proposes run-ID + task-ID + revision-bound
+//! messages and the supervisor acknowledges and journals each one (M10
+//! plan §2); the process-wide ownership guard admits exactly one
+//! supervisor per (`state-database path`, `TaskId`).
 //!
 //! JSON report goes to stdout; diagnostics go to stderr.
 
@@ -29,20 +29,16 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use tachyon_core::runtime::{
-    EvidenceRequest, ModelProposal, MutationIntent, NodeTiming, ProposedFile, RuntimeBounds,
-    SelectionResolution, bind_contract, collect_evidence, compile_evidence_graph,
-    evidence_concurrency, gate_proposal_writes, manifest_of, max_overlap, parse_proposal,
-    persist_intent, resolve_check_selection,
-};
-use tachyon_core::{TaskStatus, create_task, recover_task};
+use tachyon_core::create_task;
+use tachyon_core::driver::{DriveHost, EvidenceMode, RunPlan, drive};
+use tachyon_core::runtime::{EvidenceRequest, RuntimeBounds, evidence_concurrency, max_overlap};
+use tachyon_models::UsageProvenance;
 use tachyon_models::fake::{FakeModelProvider, FakeResponse};
-use tachyon_models::{AgentDecision, ModelProvider, ModelRequest, Role, UsageProvenance};
-use tachyon_mutation::{MutationEngine, PatchSpec, blake3_hex};
+use tachyon_mutation::blake3_hex;
 use tachyon_policy::Policy;
 use tachyon_store::StoreWriter;
 use tachyon_tools::{ToolsContext, artifact::ArtifactSpool};
-use tachyon_types::{MutationBatchId, ProviderId, SessionId, WorkspaceId};
+use tachyon_types::{ProviderId, SessionId, WorkspaceId};
 use tachyon_verify::{AcceptanceContract, Clause, CommandCheck, VerificationRisk};
 
 const TARGET: &str = "auth-session/src/session.rs";
@@ -171,7 +167,6 @@ async fn main() {
 async fn run(mode: &str) -> Result<serde_json::Value, String> {
     let t0 = Instant::now();
     let ms = |t: Instant| u64::try_from(t.duration_since(t0).as_millis()).unwrap_or(u64::MAX);
-    let us = |t: Instant| u64::try_from(t.duration_since(t0).as_micros()).unwrap_or(u64::MAX);
     let bounds = RuntimeBounds::default();
 
     // Fresh scratch fixture copy; the checked-in fixture is never patched.
@@ -205,10 +200,31 @@ async fn run(mode: &str) -> Result<serde_json::Value, String> {
     }
     eprintln!("broken-first check: regression fails as expected");
 
-    // Evidence through the production collector. Full mode runs one
-    // single-request collection per file concurrently behind a barrier so
-    // the overlap below is real measured concurrency; serial mode reads
-    // sequentially and records 1.
+    // Scripted test/replay provider: a fixed transformation of the
+    // target bytes (broken body -> guarded body), served through a real
+    // ModelProvider so the call count and usage provenance are measured.
+    // The script is queued before the shared driver runs.
+    let broken_bytes = std::fs::read(ws.join(TARGET)).map_err(|e| format!("target read: {e}"))?;
+    let broken_text =
+        String::from_utf8(broken_bytes.clone()).map_err(|e| format!("fixture utf8: {e}"))?;
+    if !broken_text.contains(BROKEN_BODY) {
+        return Err("fixture does not contain the known stale-refresh body".into());
+    }
+    let fixed_text = broken_text.replacen(BROKEN_BODY, FIXED_BODY, 1);
+    let provider = Arc::new(FakeModelProvider::new(ProviderId("bench-script".into())));
+    let script = serde_json::json!({
+        "decision": "propose_execution",
+        "operations": [{
+            "capability": "mutation.patch",
+            "args": {
+                "path": TARGET,
+                "base_hash": blake3_hex(&broken_bytes),
+                "new_content": fixed_text,
+            }
+        }]
+    });
+    provider.push_response(FakeResponse::respond(&script.to_string()));
+
     let requests: Vec<EvidenceRequest> = EVIDENCE_PATHS
         .iter()
         .map(|p| EvidenceRequest {
@@ -216,206 +232,12 @@ async fn run(mode: &str) -> Result<serde_json::Value, String> {
             path: p.to_string(),
         })
         .collect();
-    let mut items = Vec::new();
-    let mut intervals_us: Vec<(u64, u64)> = Vec::new();
-    let mut timings: Vec<NodeTiming> = Vec::new();
-    if mode == "full" {
-        let barrier = Arc::new(tokio::sync::Barrier::new(requests.len() + 1));
-        let mut handles = Vec::new();
-        for req in &requests {
-            let ctx = context.clone();
-            let b = bounds;
-            let r = req.clone();
-            let gate = barrier.clone();
-            handles.push(tokio::spawn(async move {
-                gate.wait().await;
-                let s = Instant::now();
-                let out = collect_evidence(&ctx, std::slice::from_ref(&r), &b);
-                let e = Instant::now();
-                (r.path, out, s, e)
-            }));
-        }
-        barrier.wait().await;
-        for h in handles {
-            let (path, out, s, e) = h.await.map_err(|e| format!("evidence join: {e}"))?;
-            let mut got = out.map_err(|e| format!("collect_evidence {path}: {e}"))?;
-            assert_eq!(got.len(), 1);
-            items.push(got.pop().unwrap());
-            intervals_us.push((us(s), us(e)));
-            timings.push(NodeTiming {
-                node: format!("fs.read:{path}"),
-                start_ms: ms(s),
-                end_ms: ms(e),
-            });
-        }
-    } else {
-        for req in &requests {
-            let s = Instant::now();
-            let mut got = collect_evidence(&context, std::slice::from_ref(req), &bounds)
-                .map_err(|e| format!("collect_evidence {}: {e}", req.path))?;
-            let e = Instant::now();
-            items.push(got.pop().unwrap());
-            intervals_us.push((us(s), us(e)));
-            timings.push(NodeTiming {
-                node: format!("fs.read:{}", req.path),
-                start_ms: ms(s),
-                end_ms: ms(e),
-            });
-        }
-    }
-    items.sort_by(|a, b| a.path.cmp(&b.path));
-    let first_evidence_ms = timings.iter().map(|t| t.end_ms).min();
-    let max_concurrency = if mode == "serial" {
-        usize::from(!timings.is_empty())
-    } else {
-        max_overlap(&intervals_us)
-    };
-    // Same helper the unit tests pin; report a mismatch instead of hiding it.
-    let helper_check = evidence_concurrency(&timings);
-    eprintln!("max_overlap(us)={max_concurrency} evidence_concurrency(ms)={helper_check}");
 
-    // Re-key the runtime hash to the authoritative M8 content hash (same
-    // bytes, two hash views) so the gate binds the supplied version.
-    for item in &mut items {
-        item.hash = blake3_hex(&item.bytes);
-    }
-    let manifest = manifest_of(&items);
-    let Some(target) = items.iter().find(|i| i.path == TARGET) else {
-        return Err("target not among evidence".into());
-    };
-    let broken_bytes = target.bytes.clone();
-    let base_hash = target.hash.clone();
-
-    // Scripted test/replay provider: a fixed transformation of the supplied
-    // evidence (broken body -> guarded body), served through a real
-    // ModelProvider so the call count and usage provenance are measured.
-    let broken_text =
-        String::from_utf8(broken_bytes.clone()).map_err(|e| format!("fixture utf8: {e}"))?;
-    if !broken_text.contains(BROKEN_BODY) {
-        return Err("fixture does not contain the known stale-refresh body".into());
-    }
-    let fixed_text = broken_text.replacen(BROKEN_BODY, FIXED_BODY, 1);
-    let provider = FakeModelProvider::new(ProviderId("bench-script".into()));
-    let script = serde_json::json!({
-        "decision": "propose_execution",
-        "operations": [{
-            "capability": "mutation.patch",
-            "args": {
-                "path": TARGET,
-                "base_hash": base_hash,
-                "new_content": fixed_text,
-            }
-        }]
-    });
-    provider.push_response(FakeResponse::respond(&script.to_string()));
-    let (sink, _events) = tokio::sync::mpsc::unbounded_channel();
-    let request = ModelRequest {
-        role: Role::Primary,
-        model: "scripted-replay-1".into(),
-        context: Vec::new(),
-        max_output_tokens: 1024,
-        require_structured_output: false,
-    };
-    let result = provider
-        .invoke(request, sink)
-        .await
-        .map_err(|e| format!("scripted provider: {e}"))?;
-    let model_calls = provider.request_count() as u64;
-    let usage_provenance = match result.usage.provenance {
-        UsageProvenance::ProviderReported => "provider_reported",
-        UsageProvenance::Scripted => "scripted",
-        UsageProvenance::Unknown => "unknown",
-    };
-    let AgentDecision::Respond { message } = result.decision else {
-        return Err("script must return its JSON as a Respond message".into());
-    };
-    let proposal_value: serde_json::Value =
-        serde_json::from_str(&message).map_err(|e| format!("script json: {e}"))?;
-    let proposal =
-        parse_proposal(&proposal_value, &bounds).map_err(|e| format!("parse_proposal: {e}"))?;
-    let ModelProposal::Patch { files } = proposal else {
-        return Err("script must propose a patch".into());
-    };
-    let files: Vec<ProposedFile> = files
-        .into_iter()
-        .map(|f| ProposedFile {
-            path: f.path,
-            base_hash: f.base_hash,
-            new_content: f.new_content,
-        })
-        .collect();
-
-    // Pre-mutation gate against the bound contract, then real M8 mutation.
-    // The task id below is the supervisor's once created; validate the
-    // evidence graph IR first with a placeholder-free compile.
-    let bound = bind_contract(contract(), 0);
-    gate_proposal_writes(&bound, &files, &manifest, &[])
-        .map_err(|e| format!("gate_proposal_writes: {e}"))?;
-    let compile_graph =
-        compile_evidence_graph(tachyon_types::TaskId::generate(), 0, &requests, &bounds)
-            .map_err(|e| format!("compile_evidence_graph: {e}"))?;
-    persist_intent(
-        &mutation_dir,
-        "bench-batch-1",
-        &MutationIntent::authorized("bench-batch-1", &files).map_err(|e| format!("intent: {e}"))?,
-    )
-    .map_err(|e| format!("persist_intent: {e}"))?;
-    let engine = MutationEngine::open(&ws, &mutation_dir).map_err(|e| format!("engine: {e}"))?;
-    let spec = PatchSpec {
-        path: TARGET.into(),
-        base_hash: Some(base_hash.clone()),
-        new_content: fixed_text.as_bytes().to_vec(),
-    };
-    let batch = MutationBatchId::generate();
-    let prepared = engine
-        .prepare_authorized(&context, batch, std::slice::from_ref(&spec))
-        .map_err(|e| format!("prepare: {e}"))?;
-    let commit = engine
-        .commit_authorized_up_to(&context, &prepared, usize::MAX)
-        .map_err(|e| format!("commit: {e}"))?;
-    if !commit.completed {
-        return Err("mutation batch did not complete".into());
-    }
-    let first_edit_ms = ms(Instant::now());
-    if std::fs::read(ws.join(TARGET)).map_err(|e| format!("read back: {e}"))?
-        != fixed_text.as_bytes()
-    {
-        return Err("repaired bytes differ from proposal".into());
-    }
-
-    // Selected-check resolution is reported honestly; Affected risk runs the
-    // affected crates, unrelated metrics only under Full risk.
-    let available = vec!["auth-session".to_string(), "client".to_string()];
-    let mut selected_checks = Vec::new();
-    let mut broadened = false;
-    for want in ["auth-session", "client"] {
-        match resolve_check_selection(want, &available) {
-            SelectionResolution::Exact(hit) => selected_checks.push(hit),
-            SelectionResolution::BroadenedWorkspace => {
-                broadened = true;
-                selected_checks.push("workspace".into());
-            }
-            SelectionResolution::Ignored => {}
-        }
-    }
-
-    // Verification: supervisor path for full/serial, direct control for
-    // reference. Completion is granted only by fresh passing checks.
-    let (outcome, task_id, revision, recovery, final_verification_ms) = if mode == "reference" {
-        let passed = cargo_test(&ws, &fixture_target).await;
-        let done_ms = ms(Instant::now());
-        (
-            if passed {
-                "completed_reference"
-            } else {
-                "verification_failed"
-            }
-            .to_string(),
-            None,
-            None,
-            None,
-            Some(done_ms),
-        )
+    // The supervisor path creates its task BEFORE the run so every stage
+    // is journaled through the proposal/ack pattern; the reference mode
+    // keeps no task, no journal.
+    let store = if mode == "reference" {
+        None
     } else {
         let state_dir = scratch.join("state");
         std::fs::create_dir_all(&state_dir).map_err(|e| format!("state dir: {e}"))?;
@@ -437,47 +259,93 @@ async fn run(mode: &str) -> Result<serde_json::Value, String> {
         )
         .await
         .map_err(|e| format!("create_task: {e}"))?;
-        let id_str = task.task_id().to_string();
-        task.configure_verification(context.clone(), contract(), VerificationRisk::Affected)
-            .await
-            .map_err(|e| format!("configure: {e}"))?;
-        let state = task
-            .verify_and_complete(context.clone())
-            .await
-            .map_err(|e| format!("verify: {e}"))?;
-        let done_ms = ms(Instant::now());
-        let status = state.status;
-        let rev = state.revision;
-        let outcome = if status == TaskStatus::Completed {
-            "completed"
-        } else {
-            "verification_failed"
+        Some((task, store))
+    };
+
+    // Keep an Arc so this host (the opener) can close the store after
+    // the driver leaves the task shut down.
+    let mut store_holder: Option<Arc<StoreWriter>> = None;
+    let host = match store {
+        Some((task, store)) => {
+            store_holder = Some(store.clone());
+            DriveHost::Supervisor {
+                handle: task,
+                store,
+            }
         }
-        .to_string();
-        // Real recovery round-trip: shutdown, reopen the same task identity,
-        // confirm the durable status survives.
-        task.shutdown()
-            .await
-            .map_err(|e| format!("shutdown: {e}"))?;
-        let recovered = recover_task(task.task_id(), store.clone())
-            .await
-            .map_err(|e| format!("recover: {e}"))?;
-        let restate = recovered
-            .get_state()
-            .await
-            .map_err(|e| format!("get_state: {e}"))?;
-        let recovery_label = format!("recovered_{:?}", restate.status).to_lowercase();
-        recovered
-            .shutdown()
-            .await
-            .map_err(|e| format!("shutdown2: {e}"))?;
+        None => DriveHost::Reference,
+    };
+    let plan = RunPlan {
+        origin: t0,
+        evidence_mode: if mode == "full" {
+            EvidenceMode::Concurrent
+        } else {
+            EvidenceMode::Serial
+        },
+        evidence: requests.clone(),
+        contract: contract(),
+        risk: VerificationRisk::Affected,
+        mutation_dir,
+        batch_id: "bench-batch-1".into(),
+        model: "scripted-replay-1".into(),
+        requested_checks: vec!["auth-session".to_string(), "client".to_string()],
+        available_checks: vec!["auth-session".to_string(), "client".to_string()],
+        bounds,
+        cancel: tokio_util::sync::CancellationToken::new(),
+    };
+    let outcome = drive(host, context, provider.clone(), plan)
+        .await
+        .map_err(|e| format!("drive: {e}"))?;
+    if let Some(store) = store_holder {
         store.close().await;
+    }
+
+    // Measured concurrency: full mode overlaps for real behind the
+    // barrier; serial mode reads sequentially and records 1. Same helper
+    // the unit tests pin; report a mismatch instead of hiding it.
+    let timings = outcome.node_timings.clone();
+    let max_concurrency = if mode == "serial" {
+        usize::from(!timings.is_empty())
+    } else {
+        max_overlap(&outcome.intervals_us)
+    };
+    let helper_check = evidence_concurrency(&outcome.node_timings);
+    eprintln!("max_overlap(us)={max_concurrency} evidence_concurrency(ms)={helper_check}");
+
+    let model_calls = provider.request_count() as u64;
+    let usage_provenance = match outcome.usage.provenance {
+        UsageProvenance::ProviderReported => "provider_reported",
+        UsageProvenance::Scripted => "scripted",
+        UsageProvenance::Unknown => "unknown",
+    };
+
+    // Verification: supervisor path ran inside the shared driver;
+    // reference keeps its declared control-loop tail in this host.
+    let (label, task_id, revision, recovery, final_verification_ms) = if mode == "reference" {
+        let passed = cargo_test(&ws, &fixture_target).await;
+        let done_ms = ms(Instant::now());
         (
-            outcome,
-            Some(id_str),
-            Some(rev),
-            Some(recovery_label),
+            if passed {
+                "completed_reference"
+            } else {
+                "verification_failed"
+            }
+            .to_string(),
+            None,
+            None,
+            None,
             Some(done_ms),
+        )
+    } else {
+        (
+            outcome
+                .outcome
+                .clone()
+                .ok_or_else(|| "supervisor run returned no outcome".to_string())?,
+            outcome.task_id.clone(),
+            outcome.revision,
+            outcome.recovery.clone(),
+            outcome.final_verification_ms,
         )
     };
 
@@ -487,10 +355,10 @@ async fn run(mode: &str) -> Result<serde_json::Value, String> {
 
     Ok(serde_json::json!({
         "mode": mode,
-        "outcome": outcome,
+        "outcome": label,
         "speculation": "no-speculation/no-judgment coincide with full: no speculative/Jev stage exists in this slice",
         "broken_first_failed": true,
-        "node_timings": timings,
+        "node_timings": outcome.node_timings,
         "max_evidence_concurrency": max_concurrency,
         "model_calls": model_calls,
         "tool_calls": EVIDENCE_PATHS.len() as u64 + 2,
@@ -498,22 +366,22 @@ async fn run(mode: &str) -> Result<serde_json::Value, String> {
         "estimated_tokens": null,
         "billed_tokens": null,
         "usage_provenance": usage_provenance,
-        "changed_paths": [TARGET],
-        "selected_checks": selected_checks,
-        "check_broadening": broadened,
+        "changed_paths": outcome.changed_paths,
+        "selected_checks": outcome.selected_checks,
+        "check_broadening": outcome.check_broadening,
         "check_note": "Affected risk runs auth-session + client; unrelated metrics only under Full risk",
         "task_id": task_id,
         "revision": revision,
         "recovery": recovery,
         "wall_ms": ms(Instant::now()),
-        "first_evidence_ms": first_evidence_ms,
-        "first_edit_ms": first_edit_ms,
+        "first_evidence_ms": outcome.first_evidence_ms,
+        "first_edit_ms": outcome.first_edit_ms,
         "final_verification_ms": final_verification_ms,
         "sample_count": 1,
         "p50_ms": null,
         "p95_ms": null,
         "fixture_unchanged": fixture_unchanged,
-        "evidence_graph_nodes": compile_graph.nodes.len(),
+        "evidence_graph_nodes": outcome.evidence_graph_nodes,
         "scratch": scratch.display().to_string(),
     }))
 }

@@ -15,6 +15,12 @@ pub enum VerifyError {
     Io(#[from] std::io::Error),
     #[error("verification blocked: {0}")]
     Blocked(String),
+    /// The policy asked for a human decision before the exact acceptance
+    /// operation may proceed (M11 typed parking). Typed through the
+    /// runner and the core so the driver parks instead of recording a
+    /// failed check; carries the pending approval request itself.
+    #[error("approval required for {} on {}", .0.capability.0, .0.scope)]
+    ApprovalRequired(tachyon_policy::ApprovalRequest),
 }
 
 /// A direct command. No shell interpolation; argv is passed verbatim.

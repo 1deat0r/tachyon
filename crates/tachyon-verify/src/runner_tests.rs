@@ -73,6 +73,7 @@ async fn forged_node_schema_access_and_retries_cannot_reach_processes() {
                 .await
                 .unwrap(),
             lifetime: Arc::new(()),
+            asked: Mutex::new(None),
         };
         let outcome = runner
             .execute_owned(&node, serde_json::Map::new(), CancellationToken::new())

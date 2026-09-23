@@ -14,7 +14,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use tachyon_tools::{ToolsContext, artifact::ArtifactSpool, authorize};
+use tachyon_tools::{ToolError, ToolsContext, artifact::ArtifactSpool, authorize, authorize_peek};
 use tachyon_types::MutationBatchId;
 
 use super::scoped::valid_hash;
@@ -73,8 +73,10 @@ impl MutationEngine {
         let scope = AuthorizedScope::open(self, context)?;
         let ops = self.prepare_authorizations(batch_id, specs)?;
         // 1. Exact authorization for every target and derived temp, first.
+        //    Pre-effect gate: a present grant satisfies without consuming
+        //    (M11) — the single use belongs to the per-effect recheck.
         for op in &ops {
-            scope.authorize(op)?;
+            scope.gate(op)?;
         }
         // 2. Attempt identity from strict journal truth.
         match self.journal.replay_scoped(batch_id) {
@@ -196,8 +198,10 @@ impl MutationEngine {
             ops.extend(commit_file_ops(prepared.id, file, limit, &plan)?);
         }
         // 2. Exact authorization for every pending operation in the boundary.
+        //    Pre-effect gate (no effect yet in this step): peek, do not
+        //    consume — step 4's per-effect recheck is the one-shot use.
         for op in &ops {
-            scope.authorize(op)?;
+            scope.gate(op)?;
         }
         // 3. Read-only inspection of every source and owned temp image.
         let mut group = Vec::new();
@@ -383,7 +387,27 @@ impl<'a> AuthorizedScope<'a> {
             &op.operation,
             "authorized mutation patch",
         )
-        .map_err(|error| blocked(&error.to_string()))
+        .map_err(map_authorization)
+    }
+
+    /// Pre-effect gate (M11): the same policy decision as
+    /// [`Self::authorize`], but a present one-shot grant SATISFIES
+    /// without consuming it. Preparation and the commit boundary execute
+    /// nothing yet, so burning grants there would make every gate re-run
+    /// after a grant re-ask the operations granted earlier (exponential
+    /// re-parking); the grant's single use belongs to the per-effect
+    /// recheck in `commit_authorized_up_to`, which still calls
+    /// [`Self::authorize`]. The typed ask parks exactly the same.
+    fn gate(&self, op: &AuthorizedOp) -> Result<(), MutationError> {
+        authorize_peek(
+            &self.context.policy,
+            &self.context.approvals,
+            &op.capability,
+            &op.scope,
+            &op.operation,
+            "authorized mutation patch",
+        )
+        .map_err(map_authorization)
     }
 
     /// Read-only structural and preimage preflight for one spec: literal
@@ -653,4 +677,15 @@ fn plain_path(root: &Path, path: &Path, allow_file_leaf: bool) -> Result<(), Mut
 
 fn blocked(reason: &str) -> MutationError {
     MutationError::RecoveryBlocked(reason.to_owned())
+}
+
+/// One policy-authorization outcome → one typed mutation error: an ask
+/// keeps its exact pending request (M11 typed parking — the
+/// supervisor-owned run parks instead of failing), every other failure
+/// collapses to the stringy guard as before.
+fn map_authorization(error: ToolError) -> MutationError {
+    match error {
+        ToolError::ApprovalRequired { request, .. } => MutationError::ApprovalRequired(*request),
+        other => blocked(&other.to_string()),
+    }
 }

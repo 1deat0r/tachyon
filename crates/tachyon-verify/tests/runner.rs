@@ -198,7 +198,7 @@ use tachyon_policy::{DefaultPosture, Policy};
 use tachyon_tools::{ToolsContext, artifact::ArtifactSpool};
 use tachyon_types::TaskId;
 use tachyon_verify::{
-    AcceptanceContract, Clause, CommandCheck, VerificationPlan, VerificationRisk,
+    AcceptanceContract, Clause, CommandCheck, VerificationPlan, VerificationRisk, VerifyError,
     WorkspaceSnapshot, run,
 };
 use tokio_util::sync::CancellationToken;
@@ -456,24 +456,42 @@ async fn verify_capability_deny_or_ask_prevents_side_effects() {
                 command: python("open('marker', 'w').write('forbidden')"),
             }],
         );
-        let report = run(
+        let outcome = run(
             plan,
             context(&ws, &artifacts, policy),
             CancellationToken::new(),
         )
-        .await
-        .unwrap();
+        .await;
+        // Shared invariant of both postures: the policy question is
+        // resolved BEFORE any side effect — the marker never exists.
         assert!(
             !ws.path().join("marker").exists(),
             "verification policy was bypassed"
         );
-        assert!(!report.passed());
-        assert!(
-            report
-                .failures()
-                .iter()
-                .any(|reason| reason.contains("verify.command"))
-        );
+        match posture {
+            // Deny: a failed check carrying the capability, as before.
+            DefaultPosture::Deny => {
+                let report = outcome.unwrap();
+                assert!(!report.passed());
+                assert!(
+                    report
+                        .failures()
+                        .iter()
+                        .any(|reason| reason.contains("verify.command"))
+                );
+            }
+            // Ask: the TYPED request surfaces (M11 typed parking) so a
+            // supervisor-owned run can park — never a failed check.
+            DefaultPosture::Ask => match outcome {
+                Err(VerifyError::ApprovalRequired(request)) => {
+                    assert_eq!(
+                        request.capability.0, "verify.command",
+                        "the ask carries its exact capability"
+                    );
+                }
+                other => panic!("expected the typed approval request, got {other:?}"),
+            },
+        }
     }
 }
 

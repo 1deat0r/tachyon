@@ -57,6 +57,21 @@ impl WorkspaceLease {
     pub fn root(&self) -> &Path {
         &self.0.root
     }
+
+    /// Non-blocking probe: `Ok(Some(lease))` when the root is free,
+    /// `Ok(None)` while another holder owns it. Never waits, so there is
+    /// no cancellation token to thread: absence of a lease grants nothing.
+    pub async fn try_acquire(root: &Path) -> Result<Option<Self>, ToolError> {
+        let root = tokio::fs::canonicalize(root).await?;
+        let lock = workspace_lock(&root)?;
+        match lock.try_lock_owned() {
+            Ok(guard) => Ok(Some(Self(Arc::new(HeldLease {
+                root,
+                _guard: guard,
+            })))),
+            Err(_) => Ok(None),
+        }
+    }
 }
 
 type Registry = Mutex<HashMap<PathBuf, Weak<AsyncMutex<()>>>>;

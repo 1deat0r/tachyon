@@ -625,6 +625,35 @@ impl Loop {
     ) {
         let report = match result {
             Ok(report) => report,
+            Err(VerifyError::ApprovalRequired(request)) => {
+                // M11 typed parking: an ask is not a verification failure.
+                // The durable Finished arm clears the Started flag and
+                // lands the status back on `Executing` (admissible for
+                // both the park and its grant-rerun), and the TYPED
+                // request — never a string — replies to the driver so it
+                // parks exactly like the evidence stage.
+                if self.active.as_ref().is_none_or(|active| active.key != key) {
+                    return;
+                }
+                let message = format!(
+                    "approval required: {} on {}",
+                    request.capability.0, request.scope
+                );
+                let finished = self
+                    .transition_journalled(StateEvent::VerificationFinished {
+                        report: None,
+                        error: Some(message),
+                        completed: false,
+                    })
+                    .await;
+                match finished {
+                    Ok(_) => self.complete_operation(Err(CoreError::Verification(
+                        VerifyError::ApprovalRequired(request),
+                    ))),
+                    Err(error) => self.complete_operation(Err(error)),
+                }
+                return;
+            }
             Err(error) => {
                 self.journal_finished(key, None, Some(error.to_string()))
                     .await;
@@ -750,9 +779,16 @@ async fn leased_capture(
     lifetime: Arc<dyn Send + Sync>,
     cancel: CancellationToken,
 ) -> (Result<WorkspaceSnapshot, CoreError>, Option<WorkspaceLease>) {
-    let lease = match WorkspaceLease::acquire(&context.workspace_root, &cancel).await {
-        Ok(lease) => lease,
-        Err(error) => return (Err(blocked(&error.to_string())), None),
+    // M11 slice 1: when the run path attached its lease (StartRun prepare)
+    // reuse that guard — the per-root registry lock is NOT reentrant, so
+    // re-acquiring the root the run already holds would self-deadlock.
+    // A context without an attached lease keeps the stage-local acquire.
+    let lease = match context.workspace_lease().cloned() {
+        Some(run_lease) => run_lease,
+        None => match WorkspaceLease::acquire(&context.workspace_root, &cancel).await {
+            Ok(lease) => lease,
+            Err(error) => return (Err(blocked(&error.to_string())), None),
+        },
     };
     // Cancellation is rechecked after acquisition and immediately before the
     // scan: a cancelled stage performs no workspace read.
@@ -801,9 +837,14 @@ async fn leased_plan(
     cancel: CancellationToken,
     lifetime: Arc<dyn Send + Sync>,
 ) -> (Result<VerificationPlan, CoreError>, Option<WorkspaceLease>) {
-    let lease = match WorkspaceLease::acquire(&context.workspace_root, &cancel).await {
-        Ok(lease) => lease,
-        Err(error) => return (Err(blocked(&error.to_string())), None),
+    // M11 slice 1: reuse the run-held lease when present (non-reentrant
+    // lock); stage-local acquire only for contexts without one.
+    let lease = match context.workspace_lease().cloned() {
+        Some(run_lease) => run_lease,
+        None => match WorkspaceLease::acquire(&context.workspace_root, &cancel).await {
+            Ok(lease) => lease,
+            Err(error) => return (Err(blocked(&error.to_string())), None),
+        },
     };
     if cancel.is_cancelled() {
         return (
