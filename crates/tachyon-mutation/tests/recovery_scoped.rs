@@ -41,7 +41,10 @@ impl Fixture {
         for capability in ["fs.read", "fs.metadata"] {
             policy.allow(
                 capability,
-                &format!("external:{}/artifacts/**", self.state.display()),
+                &format!(
+                    "external:{}/artifacts/**",
+                    self.state.display().to_string().replace('\\', "/")
+                ),
             );
         }
         ToolsContext::new(
@@ -327,9 +330,13 @@ fn scoped_preflight_vetoes_entire_attempt_on_mismatch_or_denial() {
                 "deny_cleanup" => context
                     .policy
                     .deny("fs.delete", &format!("workspace/{temp}")),
-                "deny_artifact_read" => context
-                    .policy
-                    .deny("fs.read", &format!("external:{}", artifact.display())),
+                "deny_artifact_read" => context.policy.deny(
+                    "fs.read",
+                    &format!(
+                        "external:{}",
+                        artifact.display().to_string().replace('\\', "/")
+                    ),
+                ),
                 _ => unreachable!(),
             }
             fixture.write(".operator.tachyon-tmp-keep", b"protected");

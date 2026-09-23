@@ -552,7 +552,10 @@ mod tests {
         for capability in ["fs.read", "fs.metadata"] {
             policy.allow(
                 capability,
-                &format!("external:{}/artifacts/**", state.display()),
+                &format!(
+                    "external:{}/artifacts/**",
+                    state.display().to_string().replace('\\', "/")
+                ),
             );
         }
         let context = ToolsContext::new(

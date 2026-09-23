@@ -54,7 +54,10 @@ impl Fixture {
         for capability in ["fs.read", "fs.metadata"] {
             policy.allow(
                 capability,
-                &format!("external:{}/artifacts/**", self.state.display()),
+                &format!(
+                    "external:{}/artifacts/**",
+                    self.state.display().to_string().replace('\\', "/")
+                ),
             );
         }
         ToolsContext::new(
@@ -355,7 +358,10 @@ fn lost_temp_is_restaged_from_the_retained_postimage_under_exact_grants() {
     for capability in ["fs.read", "fs.metadata"] {
         withheld.policy.deny(
             capability,
-            &format!("external:{}/artifacts/**", fixture.state.display()),
+            &format!(
+                "external:{}/artifacts/**",
+                fixture.state.display().to_string().replace('\\', "/")
+            ),
         );
     }
     let before = snapshot(&fixture.root);

@@ -51,7 +51,10 @@ impl Fixture {
         for capability in ["fs.read", "fs.metadata"] {
             policy.allow(
                 capability,
-                &format!("external:{}/artifacts/**", self.state.display()),
+                &format!(
+                    "external:{}/artifacts/**",
+                    self.state.display().to_string().replace('\\', "/")
+                ),
             );
         }
         ToolsContext::new(
