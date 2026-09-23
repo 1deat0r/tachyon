@@ -5,6 +5,7 @@
 //! evidence and mutation root, so no await window between the pin and
 //! the context construction can make them diverge. The contrast case
 //! proves this test would catch a reintroduced re-canonicalization.
+#![cfg(unix)]
 
 use std::path::PathBuf;
 

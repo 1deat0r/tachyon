@@ -345,6 +345,7 @@ async fn start_run_pins_the_canonical_root_only_after_checks_pass() {
 /// read one root (`ToolsContext::new_from_canonical` performs no
 /// canonicalize; prepare's `debug_assert_eq!` fires on any divergence and
 /// is active for THIS very run — the test binary is a debug build).
+#[cfg(unix)]
 #[tokio::test]
 async fn start_run_scopes_one_canonical_root_from_pin_through_policy() {
     let dir = test_dir();
