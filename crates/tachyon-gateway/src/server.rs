@@ -1116,17 +1116,30 @@ async fn supervisor_for(
     // Bound exhausted (a stuck or panicked recoverer left the flag held):
     // attempt directly WITHOUT touching the flag — a typed
     // `task_already_owned` here is honest after a 5 s wait.
-    match recover_task(task_id, state.store.clone()).await {
-        Ok(handle) => {
-            state
-                .supervisors
-                .lock()
-                .await
-                .insert(task_id, handle.clone());
-            Ok(handle)
+    // `TaskAlreadyOwned` from a successful recover is often the previous
+    // lease still draining after run completion (map entry already gone);
+    // retry with a short backoff so GetTask/StartRun do not surface a
+    // transient race as a hard client error.
+    let mut attempts = 0_u32;
+    loop {
+        match recover_task(task_id, state.store.clone()).await {
+            Ok(handle) => {
+                state
+                    .supervisors
+                    .lock()
+                    .await
+                    .insert(task_id, handle.clone());
+                return Ok(handle);
+            }
+            Err(CoreError::UnknownTask(_)) => {
+                return Err(fail("unknown_task", format!("no task {task_id}")));
+            }
+            Err(CoreError::TaskAlreadyOwned(_)) if attempts < 50 => {
+                attempts += 1;
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            Err(other) => return Err(core_err(&other)),
         }
-        Err(CoreError::UnknownTask(_)) => Err(fail("unknown_task", format!("no task {task_id}"))),
-        Err(other) => Err(core_err(&other)),
     }
 }
 
@@ -1138,22 +1151,35 @@ async fn finish_recovery(
     state: &Arc<GatewayState>,
     task_id: TaskId,
 ) -> Result<SupervisorHandle, CommandResult> {
-    match recover_task(task_id, state.store.clone()).await {
-        Ok(handle) => {
-            state
-                .supervisors
-                .lock()
-                .await
-                .insert(task_id, handle.clone());
-            state.recovering.lock().await.remove(&task_id);
-            Ok(handle)
-        }
-        Err(error) => {
-            state.recovering.lock().await.remove(&task_id);
-            Err(match error {
-                CoreError::UnknownTask(_) => fail("unknown_task", format!("no task {task_id}")),
-                other => core_err(&other),
-            })
+    let mut attempts = 0_u32;
+    loop {
+        match recover_task(task_id, state.store.clone()).await {
+            Ok(handle) => {
+                state
+                    .supervisors
+                    .lock()
+                    .await
+                    .insert(task_id, handle.clone());
+                state.recovering.lock().await.remove(&task_id);
+                return Ok(handle);
+            }
+            Err(CoreError::UnknownTask(_)) => {
+                state.recovering.lock().await.remove(&task_id);
+                return Err(fail("unknown_task", format!("no task {task_id}")));
+            }
+            // Previous lease draining after run completion: back off and
+            // retry inside the election so waiters still see one recoverer.
+            Err(CoreError::TaskAlreadyOwned(_)) if attempts < 50 => {
+                attempts += 1;
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            Err(error) => {
+                state.recovering.lock().await.remove(&task_id);
+                return Err(match error {
+                    CoreError::UnknownTask(_) => fail("unknown_task", format!("no task {task_id}")),
+                    other => core_err(&other),
+                });
+            }
         }
     }
 }
