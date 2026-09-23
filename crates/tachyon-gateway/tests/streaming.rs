@@ -97,7 +97,9 @@ impl Client {
     }
 
     /// Half-closes this side's write half; the peer sees EOF while we can
-    /// still read what it has to say.
+    /// still read what it has to say. Unix-only: named pipes have no
+    /// SHUT_WR, so the Windows close test drops the client instead.
+    #[cfg(unix)]
     async fn close_write(&mut self) {
         self.stream.shutdown().await.expect("shutdown write half");
     }
