@@ -131,8 +131,11 @@ async fn g5_run_reaches_durable_completed_with_live_events_and_untouched_fixture
 
     // Scripted test/replay provider, armed exactly like the example:
     // one fixed transformation of the target bytes, queued pre-run.
+    // Normalize CRLF→LF: Windows checkouts and the BROKEN/FIXED consts
+    // are LF; without this, contains(BROKEN_BODY) fails on windows-latest.
     let broken = std::fs::read(ws.join(TARGET)).expect("target exists");
     let broken_text = String::from_utf8(broken.clone()).expect("utf8");
+    let broken_text = broken_text.replace("\r\n", "\n");
     assert!(
         broken_text.contains(BROKEN_BODY),
         "fixture no longer contains the known stale-refresh body"
@@ -335,7 +338,11 @@ async fn g5_run_reaches_durable_completed_with_live_events_and_untouched_fixture
 
     // The scratch copy DID take the scripted patch (changed_files above).
     let patched = std::fs::read(ws.join(TARGET)).expect("target still exists");
-    assert!(String::from_utf8_lossy(&patched).contains(FIXED_BODY));
+    assert!(
+        String::from_utf8_lossy(&patched)
+            .replace("\r\n", "\n")
+            .contains(FIXED_BODY)
+    );
 
     gateway.shutdown().await;
     let _ = reader.await;
