@@ -1,9 +1,19 @@
-//! Tachyon Verify.
-//!
-//! Scaffold only. Implement according to `docs/02_IMPLEMENTATION_SPEC.md` and the
-//! milestone ordering in `docs/04_IMPLEMENTATION_PLAN.md`.
+//! Executable acceptance contracts and verification-gated completion (M9).
 
 #![warn(unsafe_code)]
 
-/// Marker proving the crate is wired into the workspace scaffold.
-pub const CRATE_NAME: &str = "tachyon-verify";
+#[cfg(test)]
+#[path = "../tests/common/mod.rs"]
+mod test_support;
+
+mod contract;
+mod plan;
+mod project;
+mod runner;
+mod snapshot;
+pub use plan::{HardRequirement, VerificationPlan, VerificationRisk};
+pub use project::{ProjectDetector, RustProjectDetector};
+pub use runner::{CheckEvidence, VerificationReport, run, run_with_lifetime};
+pub use snapshot::WorkspaceSnapshot;
+
+pub use contract::{AcceptanceContract, Clause, CommandCheck, VerifyError};

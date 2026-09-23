@@ -4,9 +4,208 @@ This file is updated by the implementing agent after every milestone.
 
 ## Current milestone
 
-Milestone 6 — Model layer (Milestone 5 complete, see gates below)
+Milestone 12 — next (Milestone 11 complete, see gates below)
 
 ## Completed gates
+
+- 2026-09-23 Milestone 11 — TUI + live gateway events + run path:
+  protocol v2 tagged `ServerFrame` with `Subscribe` streaming (ack +
+  gapless journal replay, bounded queue with last-written resync),
+  `tachyon-tui` Ratatui client (all nine docs/04 panes, honest empty
+  states), CLI `attach` + `run`/`ps`/`pause`/`resume`/`cancel` aliases,
+  operator provider config with redaction, supervisor-owned `StartRun`
+  on the shared driver (example refactored onto it), five new journal
+  kinds, approval wait with one-shot durable grants, run-held workspace
+  lease with inner reuse + `workspace_busy` refusal, detected Cargo
+  acceptance. Gate: disconnect/close leaves tasks untouched; reconnect
+  replays gapless (protocol + TUI-client legs). Parent-fixed stale-handle
+  `supervisor_gone` race with regression. G7: commit→frame n=200
+  p50 ~259µs / p95 ~311µs (<50ms PASS; run-to-run variance, both this
+  and the prior ~272/~362 run pass). Tests: 86 suites, 466 passed /
+  0 failed default (474 all-features); `fmt`, `check`, strict `clippy`
+  clean both feature sets. Plan r4 unanimous BUILD; code G8 R1:
+  2×BUILD+2×CONDITIONAL+1×REJECT → ten blockers fixed or amended;
+  R2: 2×BUILD+2×CONDITIONAL (closures landed: recovery-election
+  ordering, stale pin-then-lease doc order, amendment wording), seat5
+  pending. Report: `docs/milestones/M11_REPORT.md`.
+
+- 2026-09-22 Milestone 10 — Full debugging task: provider-neutral core
+  runtime joining evidence, model, recoverable mutation and supervisor-owned
+  verification on the production supervisor path (bounded `fs.read`
+  evidence with hash provenance, validated stage IR with lowered router
+  placeholders, typed proposals with conjunctive hard-binding and
+  `base_hash` gates before mutation, typed mutation intent, exact-hash
+  approval binding, FNV-1a freshness with a pinned BLAKE3 boundary).
+  One supervisor per (state-database, TaskId) with owned jobs, ack-after-
+  drain steering, Recovering-not-Completed restarts, and the shared
+  workspace lease held from baseline through rehash to the durable
+  completion transaction (alias spellings share the key). Strict
+  task-scoped recovery with zero writes on denied/corrupt/unknown input;
+  aliased dependency selection resolves or broadens, never ignores.
+  Gate: the checked-in broken auth-refresh fixture fails its regression
+  first; the runtime applies the model-proposed repair via authorized M8
+  mutation and selected M9 checks and reaches durable `Completed`
+  (measured: full concurrency 4, serial 1, unknowns null, n=1 per mode;
+  no speed claim). Wrong patch, Complete-alone, unknown capability,
+  denied/escaped path, migration write, stale evidence and unbound
+  constraints all refuse with zero writes; delayed-provider steering and
+  real `exit(137)` crash recovery preserve identity and contract.
+  Tests: full workspace 65 suites, 330 passed / 0 failed default
+  (338 all-features); `fmt`, `check`, strict `clippy` clean.
+- 2026-09-22 R1 board (5 seats): 1 BUILD + 4 CONDITIONAL with executed
+  proof — pre-mutation gate enforced only the first hard binding,
+  scopeless contracts authorized any path, mutation intent accepted
+  arbitrary JSON, no full-mailbox burst barrier, unpinned FNV/BLAKE3
+  boundary, undocumented example orchestration. Adjudication: all
+  accepted as real. Fixes: conjunctive binding enforcement with
+  regression, scopeless-write denial, typed `MutationIntent`, exact-hash
+  foreign-grant regression, 600-sender burst barrier, portable socket-EOF
+  liveness probe (no `/proc`), boundary pin and driver note.
+  Competing-mutation and pending-ack barriers already held as unit tests.
+- 2026-09-22 R2 board: unanimous BUILD — each fix verified by quoted
+  source plus rerun outputs. Milestone 10 GATED. Report:
+  `docs/milestones/M10_REPORT.md`.
+
+- 2026-09-22 Milestone 9 — Verification-gated completion: `tachyon-verify`
+  (typed `AcceptanceContract` with legacy fail-closed recovery, authorized
+  source snapshots, Rust affected-first planning with reverse-dependent
+  closure, validated verification IR through the scheduler, policy-bound
+  `verify.command` on the resolved canonical cwd, fresh private evidence,
+  serialized reports never re-authorize) plus supervisor-owned durable
+  completion in `tachyon-core` (immutable baseline/contract binding,
+  hard-constraint executable bindings, atomic journal/status/snapshot
+  transitions, interruption without blind replay, post-report rehash) and
+  the `tachyon-tools` process-ownership prerequisite (owned process groups,
+  TERM grace then KILL, inherited-pipe deadlines, contained cwd, bound
+  approvals, redact-before-spool). Gate: model-proposed wrong patch fails
+  the real regression (`command exited Some(101)`) and refuses `Completed`;
+  the corrected patch passes, persists `Completed`, and recovers it.
+  Tests: 32 verifier (2 unit + 4 acceptance + 6 planner + 15 runner +
+  5 snapshot), core 4 unit + 6 integration, store 4, tools 29;
+  full workspace 53 suites green; `fmt`, `check`, `clippy -D warnings` clean.
+- 2026-09-22 R1 board (5 seats): all REVISE with executed proof — cwd
+  symlink alias bypassing the `verify.command` denial, cross-run workspace
+  write-claim overlap via independent schedulers, scheduler-timeout grant
+  release before worker cleanup, snapshot cadence reset across recovery,
+  root metadata read without authorization, affected selection missing
+  reverse dependents. Adjudication: all accepted as real. Fixes: canonical
+  cwd resolution before authorization with invocation+resolved-scope approval
+  binding and same-target execution; process-wide per-workspace async lease
+  held through scheduler shutdown and worker drain; `snapshot_base`
+  threaded separately from replayed journal position; root `fs.metadata`
+  authorization before `is_dir`; reverse-dependency closure with
+  conservative workspace broadening. 6 new regression tests.
+  R2 verify-by-quote dispatched on the fixed tree.
+- 2026-09-22 R2 board (5 seats): unanimous BUILD — each fix verified by
+  quoted source plus executed regression and a novel scratch probe
+  (nested alias chain, aliased-spelling lease contention, double recovery
+  cadence, broad metadata/list denials, transitive a<-b<-c closure and
+  dependency cycles); M9 wrong-patch/correct-patch gate re-confirmed
+  6/6. Milestone 9 GATED.
+
+- 2026-09-21 Milestone 8 — Mutation engine: `tachyon-mutation`
+  (PatchSpec + base-hash guard, fsync'd batch journal with torn-tail
+  repair, preimage retention in the artifact spool, temp staging beside
+  targets, per-file rename with commit-time re-verification, finish or
+  compensate recovery with divergence freeze, changed-file events).
+  Vertical Slice C ("Fix the incorrect implementation") replaces the
+  `==` token compare with constant-time equality end to end. Gate:
+  crash injection between every file commit (k=0..=3) recovers coherent;
+  stale preimages refused at prepare and at commit; 19 tests (8 unit +
+  11 gate); `fmt`, `check`, `clippy -D warnings` clean.
+- 2026-09-21 R1 board (5 seats): spec BUILD, security BUILD, API
+  conditional BUILD, correctness HOLD, adversarial HOLD — both HOLDs
+  with executed proof (symlink-cycle sweep hang, `contains` sweep
+  deleting user files, poisoned batch denying siblings, aliasing dup
+  paths, torn restore, vacuous empty completion, commit check-then-act).
+  Adjudication: all findings accepted except race preventability
+  (inherent to recoverable-not-atomic; post-rename detection added).
+  Fixes: symlink-blind exact-pattern sweep keyed by relative temp path,
+  per-batch isolation with `batch_errors`, canonical normalization,
+  single-read prepare, retained postimage spool with temp re-staging,
+  post-rename verify (`Diverged` abort), atomic restore via temp+rename,
+  post-action sweep, lenient replay with `journal_gaps`,
+  `UnknownBatch` plan cross-check, containment into `InvalidPath`,
+  serde-stable reports, `MutationBatch` struct removed. R2 verify
+  dispatched on the fixed tree.
+- 2026-09-21 R2 board (5 seats): 4 BUILD (spec-fixes, security,
+  API, adversarial) + 1 HOLD (correctness, 8 fresh executed bugs in
+  the new code). Adjudication: 7 accepted as real (P1 same-ms temp
+  collision, P2 compensated batch finished, P3 vacuous empty
+  completion, P5 dotless restore temps, P6 rmdir of user dirs, P7
+  unbound `post_artifact`, P8 sweep IO aborting recovery); P4
+  (corrupt journal bricks finish) stays fail-closed per security +
+  adversarial seats, docs rescoped to name the hand-repair path.
+  Fixes: full-id temp names, finish refuses compensated batches and
+  completes only non-empty all-`Committed`, `post_artifact` bound in
+  plan check, dot-prefixed restore temps, rmdir removed, best-effort
+  sweep with `sweep_errors`. 2 new gate tests (same-ms temps,
+  no-resurrect); 21 tests (8 unit + 13 gate), full workspace gates
+  green (46 suites). R3 verify dispatched.
+- 2026-09-21 R3 board (3 seats): 2 BUILD (correctness re-probe of all
+  7 Ps with executed proof, spec) + 1 narrow HOLD (adversarial:
+  stale-descriptor resurrection via commit after compensate —
+  re-applies and seals against future recovery, executed). Fix:
+  `commit_up_to` refuses journaled-rolled-back batches with new
+  non-retryable `MutationError::Compensated`; resume is fresh prepare
+  only. Gate test `stale_descriptor_commit_after_compensate_refused`;
+  22 tests (8 unit + 14 gate), full workspace gates green
+  (46 suites). R4 verify dispatched.
+- 2026-09-21 R4 single seat (correctness + spec): BUILD — resurrection
+  fix re-probed with independent executed checks (stale commit refused
+  `Compensated`, non-retryable, disk untouched, future recovery clean;
+  fresh prepare on the same path still completes; no false
+  `Compensated` on normal/partial flows), M8 Build items + Slice C +
+  crash gate all green. Milestone 8 GATED: 22 tests (8 unit + 14
+  gate), 46 workspace suites green.
+
+- 2026-09-21 Milestone 7 — Judgment/OpenJEV: `tachyon-judgment`
+  (provider-neutral `JudgmentProvider`, boolean/choice/score items with
+  per-item certainty policies, batched resolution, capability-routed
+  registry with outage fallback to evidence, `FakeJudgmentProvider`,
+  `OpenJEV` adapter behind the `openjev` feature over plain-HTTP JSON,
+  opt-in router bridge closing the M5 `JudgmentFirst` loop).
+  A/B gate (synthetic fakes): 20 ambiguous requests avoid 14 model
+  calls (6 vs 20) at equal 20/20 verified success. Default
+  `JudgmentFirst` still resolves to evidence — real-workload A/B lands
+  in M13/M14. Gate: 22 tests default (15 unit + 7 gate) + 30 with
+  `openjev`; `fmt`, `check`, `clippy -D warnings` clean both ways.
+  Review: R1 1 BUILD/4 HOLD (auth flags dismissed as redaction
+  phantoms, one retracted after TCP capture); fixes — fail-closed
+  certainty, OOB bounds, resolve fallback for all provider errors,
+  policy-threaded bridge, source factory, 408/timeout mapping, bounded
+  reads; R2 4 BUILD/1 HOLD (wire-confidence laundering); fix —
+  non-finite confidence rejected at parse; R3 unanimous BUILD.
+
+- 2026-09-21 Milestone 6 — Model layer: `tachyon-retrieval`
+  (evidence structures with provenance, deterministic merge/rank),
+  `tachyon-models` (provider-neutral `ModelProvider`, capability
+  negotiation, role mapping, trusted context assembly with
+  `WorkspaceData`-never-authority, structured `AgentDecision` with
+  boundary repair, streaming event sink, `FakeModelProvider`,
+  OpenAI-compatible HTTP adapter for local inference, plain-`http`
+  only). Vertical Slice B ("Explain why these two implementations
+  behave differently") answered in one reasoning call over repo
+  evidence, citing both provenances. Gate: 34 models tests (29 unit +
+  5 gate incl. Slice B) + 7 retrieval tests green; `fmt`, `check`,
+  `clippy -D warnings` clean. R1 board (1 BUILD / 4 HOLD) adjudicated:
+  auth-key flag dismissed as display-redaction phantom (byte-verified
+  `{key}` interpolation, `grep -c` = 1); real findings fixed —
+  converging marker-aware budget fitter, pinned-never-dropped, newest
+  history survives, fail-closed trust, provenance-aware merge, NaN-safe
+  ranking, `ContextOverflow` taxonomy, usage accounting, `Retry-After`
+  support, CRLF rejection, role-carrying selection with request
+  constructor. R2 verify-by-quote: 2 BUILD (spec, adversarial) / 3 HOLD.
+  Real hang confirmed by 2 seats (fitter spun at marker floor when
+  allowance saturated to 0 with non-empty pinned content) — fixed by
+  making `truncate_block_chars` return `false` at identical-content
+  floor plus `output_exceeding_total_terminates_with_pinned` regression
+  test. API-seat auth HOLD dismissed: self-refuting (it reports 40/40
+  green including the header-carries-key test, which can only pass if
+  the key hits the wire) plus independent `od` verification. R2: 2
+  BUILD / 3 HOLD; hang fix + regression test landed. R3 unanimous
+  BUILD: all 3 HOLD seats flipped with quotes + live runs (API seat
+  confirmed the `***` was display redaction via `od` comparison).
 
 - 2026-09-21 Milestone 5 — Predictive router: `tachyon-router`
   (deterministic rule classification DirectNative/EvidenceFirst/

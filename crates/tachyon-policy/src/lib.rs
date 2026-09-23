@@ -288,22 +288,41 @@ fn write_canonical(value: &serde_json::Value, out: &mut Vec<u8>) {
 
 /// In-memory approval registry: approvals bind to operation hashes.
 /// Durable persistence rides the store's approval records (later milestone).
-#[derive(Clone, Debug, Default)]
+///
+/// Consumed on first use (M11 item 8): a granted hash authorizes exactly
+/// one successful [`Approvals::resolve`], after which the entry is removed
+/// and the operation must Ask again under a fresh approval id. The map sits
+/// behind a `Mutex` so `resolve` stays `&self` for the shared
+/// `ToolsContext` while still consuming the entry.
+#[derive(Debug, Default)]
 pub struct Approvals {
-    granted: HashMap<String, Approval>,
+    granted: std::sync::Mutex<HashMap<String, Approval>>,
+}
+
+impl Clone for Approvals {
+    fn clone(&self) -> Self {
+        Self {
+            granted: std::sync::Mutex::new(self.lock().clone()),
+        }
+    }
 }
 
 impl Approvals {
     /// Records the decision for `request`. Returns the stored approval.
-    pub fn decide(&mut self, request: ApprovalRequest, approved: bool) -> Approval {
+    /// A fresh grant for an already-consumed hash re-arms exactly one use.
+    /// Takes `&self` (the registry is behind its mutex) so a supervisor
+    /// holding a shared `Arc<ToolsContext>` can arm a granted ask.
+    pub fn decide(&self, request: ApprovalRequest, approved: bool) -> Approval {
         let stored = Approval { request, approved };
-        self.granted
+        self.lock()
             .insert(stored.request.operation_hash.clone(), stored.clone());
         stored
     }
 
     /// Resolves a pending ask: granted only when a matching approval exists
-    /// for the exact current operation hash.
+    /// for the exact current operation hash — and the grant is consumed on
+    /// that success, so the same hash authorizes exactly one execution
+    /// (M11 item 8). Denied entries persist (a denial is not a grant).
     #[must_use]
     pub fn resolve(
         &self,
@@ -315,7 +334,41 @@ impl Approvals {
                 reason: "operation changed since approval was requested".to_owned(),
             };
         }
-        match self.granted.get(&request.operation_hash) {
+        let mut granted = self.lock();
+        match granted.get(&request.operation_hash) {
+            Some(approval) if approval.approved => {
+                // Consume on first use: remove before allowing, so the
+                // success and the consumption are one atomic step.
+                granted.remove(&request.operation_hash);
+                PolicyDecision::Allow
+            }
+            Some(_) => PolicyDecision::Deny {
+                reason: "approval denied".to_owned(),
+            },
+            None => PolicyDecision::Ask {
+                request: request.clone(),
+            },
+        }
+    }
+
+    /// Resolves a pending ask WITHOUT consuming the grant (M11): a
+    /// pre-effect gate (mutation preparation, the commit boundary) checks
+    /// that a grant exists but must not burn it — the grant's single use
+    /// belongs to the per-effect recheck that actually mutates. Same
+    /// hash guard, same denial semantics; only the consume is skipped.
+    #[must_use]
+    pub fn resolve_peek(
+        &self,
+        request: &ApprovalRequest,
+        operation: &serde_json::Value,
+    ) -> PolicyDecision {
+        if operation_hash(operation) != request.operation_hash {
+            return PolicyDecision::Deny {
+                reason: "operation changed since approval was requested".to_owned(),
+            };
+        }
+        let granted = self.lock();
+        match granted.get(&request.operation_hash) {
             Some(approval) if approval.approved => PolicyDecision::Allow,
             Some(_) => PolicyDecision::Deny {
                 reason: "approval denied".to_owned(),
@@ -324,6 +377,14 @@ impl Approvals {
                 request: request.clone(),
             },
         }
+    }
+
+    /// Locks the registry; a poisoned lock still yields the map (the data
+    /// itself cannot be corrupted by a panic mid-insert).
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Approval>> {
+        self.granted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -505,8 +566,30 @@ mod tests {
     }
 
     #[test]
+    fn grant_for_another_operation_cannot_satisfy_this_ask() {
+        // A model-minted approval (granted for the model's own planned
+        // operation) presented for the real operation is denied: approval
+        // binds the exact operation hash, so no output can self-approve.
+        let approvals = Approvals::default();
+        let model_op = json!({"batch": "model-minted", "path": "evil.rs"});
+        let model_request = ApprovalRequest {
+            id: ApprovalId::generate(),
+            capability: CapabilityId("mutation.patch".to_owned()),
+            scope: "workspace/evil.rs".to_owned(),
+            operation_hash: operation_hash(&model_op),
+            summary: String::new(),
+        };
+        approvals.decide(model_request.clone(), true);
+        let real_op = json!({"batch": "real-batch-id", "path": "src/a.rs"});
+        assert!(matches!(
+            approvals.resolve(&model_request, &real_op),
+            PolicyDecision::Deny { .. }
+        ));
+    }
+
+    #[test]
     fn material_change_invalidates_approval() {
-        let mut approvals = Approvals::default();
+        let approvals = Approvals::default();
         let op = json!({"path": "a", "content": "x"});
         let request = ApprovalRequest {
             id: ApprovalId::generate(),
@@ -522,6 +605,51 @@ mod tests {
             approvals.resolve(&request, &changed),
             PolicyDecision::Deny { .. }
         ));
+    }
+
+    #[test]
+    fn granted_operation_authorizes_exactly_once_then_asks_again_fresh() {
+        // Plan item 8: a granted operation hash authorizes exactly ONE
+        // successful resolve; afterwards the grant is consumed and the same
+        // operation must Ask again under a fresh approval id — a model can
+        // never mint or replay its own grant.
+        let policy = Policy::new(DefaultPosture::Ask);
+        let approvals = Approvals::default();
+        let capability = CapabilityId("mutation.patch".to_owned());
+        let scope = "workspace/a.rs".to_owned();
+        let op = json!({"path": "a.rs", "content": "x"});
+
+        // First authorize() equivalent: Ask, human grants, resolve succeeds.
+        let PolicyDecision::Ask { request: first } =
+            policy.decide(&capability, &scope, &op, "patch a.rs")
+        else {
+            panic!("expected Ask before any grant");
+        };
+        approvals.decide(first.clone(), true);
+        assert_eq!(approvals.resolve(&first, &op), PolicyDecision::Allow);
+
+        // Second attempt on the SAME operation: the policy synthesizes a
+        // fresh ask, and the consumed grant must not satisfy it.
+        let PolicyDecision::Ask { request: second } =
+            policy.decide(&capability, &scope, &op, "patch a.rs")
+        else {
+            panic!("expected Ask after the grant was consumed");
+        };
+        assert_ne!(second.id, first.id, "policy mints a fresh approval id");
+        let decision = approvals.resolve(&second, &op);
+        assert!(
+            matches!(&decision, PolicyDecision::Ask { request } if request.id == second.id),
+            "consumed grant must re-ask under the fresh id, got {decision:?}"
+        );
+
+        // A fresh human re-grant authorizes exactly one more use, then
+        // consumption bites again.
+        approvals.decide(second.clone(), true);
+        assert_eq!(approvals.resolve(&second, &op), PolicyDecision::Allow);
+        assert!(
+            matches!(approvals.resolve(&second, &op), PolicyDecision::Ask { .. }),
+            "the re-grant must also be one-shot"
+        );
     }
 
     #[test]

@@ -5,5 +5,18 @@ edition.workspace = true
 rust-version.workspace = true
 publish = false
 
+[dependencies]
+crossterm = { workspace = true }
+ratatui = { workspace = true }
+serde_json = { workspace = true }
+tachyon-gateway = { workspace = true }
+tachyon-protocol = { workspace = true }
+tachyon-types = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tachyon-store = { workspace = true }
+
 [lints]
 workspace = true

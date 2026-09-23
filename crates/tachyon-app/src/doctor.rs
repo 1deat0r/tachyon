@@ -177,6 +177,8 @@ mod tests {
             data_dir: dir.clone(),
             evidence_grace_ms: 75,
             source_file: None,
+            provider: None,
+            provider_key: None,
         };
         let checks = run_checks(&config);
         assert!(all_ok(&checks), "{checks:?}");
@@ -191,6 +193,8 @@ mod tests {
             data_dir: std::env::temp_dir().join("tachyon-doctor-unused"),
             evidence_grace_ms: 75,
             source_file: None,
+            provider: None,
+            provider_key: None,
         });
         assert!(all_ok(&checks));
         checks[0].ok = false;

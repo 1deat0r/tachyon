@@ -9,14 +9,29 @@ publish = false
 serde = { workspace = true }
 serde_json = { workspace = true }
 tachyon-core = { workspace = true }
+# M11 plan items 5-6 (writer C): the gateway validates/pins the workspace
+# root, builds the policy ToolsContext, resolves the acceptance contract,
+# and spawns the shared driver with a configured model provider — these
+# neutral workspace crates are the same ones tachyon-core already uses.
+tachyon-models = { version = "0.0.1", path = "../tachyon-models" }
+tachyon-policy = { version = "0.0.1", path = "../tachyon-policy" }
 tachyon-protocol = { workspace = true }
 tachyon-store = { workspace = true }
+tachyon-tools = { version = "0.0.1", path = "../tachyon-tools" }
 tachyon-types = { workspace = true }
+tachyon-verify = { version = "0.0.1", path = "../tachyon-verify" }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
+
+[dev-dependencies]
+# G5 e2e arms a scripted provider exactly like the auth_refresh example
+# (base_hash over the scratch fixture) and the in-flight StartRun test
+# drives a deliberately blocking provider through the ModelProvider trait.
+async-trait = { workspace = true }
+tachyon-mutation = { version = "0.0.1", path = "../tachyon-mutation" }
 
 [lints]
 workspace = true

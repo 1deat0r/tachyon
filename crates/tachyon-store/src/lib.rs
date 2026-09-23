@@ -12,7 +12,7 @@
 
 #![warn(unsafe_code)]
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -20,7 +20,19 @@ use sqlx::FromRow;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use tachyon_types::Timestamp;
 use thiserror::Error;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, broadcast};
+
+/// One commit notification: `(task_id, committed_seq)`.
+///
+/// Fired strictly **after** a journal commit returns `Ok`, so a receiver
+/// that observes it can safely read the event back by cursor.
+pub type CommitNotice = (String, i64);
+
+/// Capacity of the commit-notification broadcast.
+///
+/// A receiver that falls behind is told how many it missed and catches up
+/// from the journal by cursor — nothing is lost, only the wakeup is.
+pub const COMMIT_NOTIFICATION_CAPACITY: usize = 256;
 
 /// Errors produced by the durability layer.
 #[derive(Debug, Error)]
@@ -43,6 +55,48 @@ pub enum StoreError {
         /// Requested task id.
         task_id: String,
     },
+    /// No approval row with this id exists.
+    #[error("approval not found: {approval_id}")]
+    ApprovalNotFound {
+        /// Requested approval id.
+        approval_id: String,
+    },
+    /// The approval row exists but is not in the state the transition
+    /// requires (only `pending` rows accept a decision, only `granted`
+    /// rows accept `applied`, only `pending` rows accept `expired`).
+    #[error("approval {approval_id} is in state {decision}, which this transition does not accept")]
+    ApprovalWrongState {
+        /// Requested approval id.
+        approval_id: String,
+        /// The row's current decision state.
+        decision: String,
+    },
+}
+
+/// One row of the 5-column `approvals` table (M11 D4: no migration).
+#[derive(Clone, Debug, PartialEq, Eq, FromRow)]
+pub struct ApprovalRow {
+    /// Approval id (hyphenated UUID).
+    pub id: String,
+    /// Owning task id.
+    pub task_id: String,
+    /// BLAKE3 hash (hex) of the exact operation this decision binds to.
+    pub operation_hash: String,
+    /// Row machine state: `pending`, `granted`, `denied`, `applied`, `expired`.
+    pub decision: String,
+    /// Decision time (micros since epoch); 0 while `pending`.
+    pub decided_at: i64,
+}
+
+/// The two human decisions a pending approval row accepts (M11 item 8):
+/// `pending -> granted | denied`. `applied` and `expired` are written by
+/// the supervisor through their own transitions, never through `decide`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ApprovalOutcome {
+    /// The human granted the operation; the row still awaits `applied`.
+    Granted,
+    /// The human denied the operation.
+    Denied,
 }
 
 /// One row of `tasks`, including the optional opaque snapshot.
@@ -104,10 +158,19 @@ pub struct TaskSummary {
     pub updated_at: i64,
 }
 
+/// Materialized task metadata committed atomically with a journal event.
+pub struct TransitionState<'a> {
+    pub status: &'a str,
+    pub revision: i64,
+    pub snapshot_json: Option<&'a str>,
+}
+
 /// The single logical writer of correctness-critical state.
 pub struct StoreWriter {
+    database_path: PathBuf,
     pool: sqlx::SqlitePool,
     write: Mutex<()>,
+    commits: broadcast::Sender<CommitNotice>,
 }
 
 impl StoreWriter {
@@ -125,10 +188,41 @@ impl StoreWriter {
             .connect_with(options)
             .await?;
         sqlx::migrate!("./migrations").run(&pool).await?;
+        let database_path = data_dir
+            .join("state.db")
+            .canonicalize()
+            .map_err(sqlx::Error::Io)?;
+        let (commits, _) = broadcast::channel(COMMIT_NOTIFICATION_CAPACITY);
         Ok(Self {
+            database_path,
             pool,
             write: Mutex::new(()),
+            commits,
         })
+    }
+
+    /// Subscribes to commit notifications fired by this writer.
+    ///
+    /// The notification carries `(task_id, seq)` and is sent only after the
+    /// commit it reports has returned `Ok`. On [`broadcast::error::RecvError::Lagged`]
+    /// the receiver must catch up with [`StoreWriter::load_events_since`] from
+    /// its own cursor — the journal, not the notification, is the source of
+    /// truth.
+    #[must_use]
+    pub fn subscribe_commits(&self) -> broadcast::Receiver<CommitNotice> {
+        self.commits.subscribe()
+    }
+
+    /// Announces a committed journal write. Best-effort: with no receivers
+    /// there is nobody to tell, and the journal already holds the event.
+    fn notify_commit(&self, task_id: &str, seq: i64) {
+        let _ = self.commits.send((task_id.to_owned(), seq));
+    }
+
+    /// Canonical database identity, shared by independently opened aliases.
+    #[must_use]
+    pub fn database_path(&self) -> &Path {
+        &self.database_path
     }
 
     /// Inserts a session row.
@@ -188,6 +282,7 @@ impl StoreWriter {
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
+        self.notify_commit(task_id, 0);
         Ok(())
     }
 
@@ -197,6 +292,28 @@ impl StoreWriter {
         task_id: &str,
         kind: &str,
         payload: &str,
+    ) -> Result<i64, StoreError> {
+        self.append(task_id, kind, payload, None).await
+    }
+
+    /// Journal and projected status/revision/snapshot share one SQLite commit.
+    /// A crash cannot leave a terminal task row without its acceptance event.
+    pub async fn append_transition(
+        &self,
+        task_id: &str,
+        kind: &str,
+        payload: &str,
+        state: TransitionState<'_>,
+    ) -> Result<i64, StoreError> {
+        self.append(task_id, kind, payload, Some(state)).await
+    }
+
+    async fn append(
+        &self,
+        task_id: &str,
+        kind: &str,
+        payload: &str,
+        state: Option<TransitionState<'_>>,
     ) -> Result<i64, StoreError> {
         let _guard = self.write.lock().await;
         let mut tx = self.pool.begin().await?;
@@ -225,7 +342,23 @@ impl StoreWriter {
             .bind(task_id)
             .execute(&mut *tx)
             .await?;
+        if let Some(state) = state {
+            sqlx::query(
+                "UPDATE tasks SET status = ?, revision = ?,
+                 snapshot_seq = CASE WHEN ? IS NULL THEN snapshot_seq ELSE ? END,
+                 snapshot_json = COALESCE(?, snapshot_json) WHERE id = ?",
+            )
+            .bind(state.status)
+            .bind(state.revision)
+            .bind(state.snapshot_json)
+            .bind(seq)
+            .bind(state.snapshot_json)
+            .bind(task_id)
+            .execute(&mut *tx)
+            .await?;
+        }
         tx.commit().await?;
+        self.notify_commit(task_id, seq);
         Ok(seq)
     }
 
@@ -294,6 +427,18 @@ impl StoreWriter {
         .map_err(StoreError::from)
     }
 
+    /// Highest journaled `seq` for one task, or -1 when it has no events.
+    /// Lets subscribers ask for the cursor without loading the journal.
+    pub async fn latest_seq(&self, task_id: &str) -> Result<i64, StoreError> {
+        let max: Option<i64> =
+            sqlx::query_scalar("SELECT MAX(seq) FROM task_events WHERE task_id = ?")
+                .bind(task_id)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(StoreError::from)?;
+        Ok(max.unwrap_or(-1))
+    }
+
     /// Lists tasks, optionally restricted to one session, newest first.
     pub async fn list_tasks(
         &self,
@@ -338,6 +483,188 @@ impl StoreWriter {
         .await
         .map_err(StoreError::from)
     }
+
+    /// Inserts a pending approval row (`decision='pending'`, `decided_at=0`)
+    /// into the existing 5-column table — no schema migration (M11 D4).
+    /// Invoked only by the task supervisor (single logical writer).
+    pub async fn insert_pending(
+        &self,
+        approval_id: &str,
+        task_id: &str,
+        operation_hash: &str,
+    ) -> Result<(), StoreError> {
+        let _guard = self.write.lock().await;
+        sqlx::query(
+            "INSERT INTO approvals (id, task_id, operation_hash, decision, decided_at)
+             VALUES (?, ?, ?, 'pending', 0)",
+        )
+        .bind(approval_id)
+        .bind(task_id)
+        .bind(operation_hash)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Records a human decision: `pending -> granted | denied` with a
+    /// wall-clock `decided_at`. Any other current state is a typed error,
+    /// so a double decide can never overwrite the first decision.
+    pub async fn decide(
+        &self,
+        approval_id: &str,
+        outcome: ApprovalOutcome,
+    ) -> Result<ApprovalRow, StoreError> {
+        let _guard = self.write.lock().await;
+        let decision = match outcome {
+            ApprovalOutcome::Granted => "granted",
+            ApprovalOutcome::Denied => "denied",
+        };
+        let now = Timestamp::now().as_micros();
+        let changed = sqlx::query(
+            "UPDATE approvals SET decision = ?, decided_at = ?
+             WHERE id = ? AND decision = 'pending'",
+        )
+        .bind(decision)
+        .bind(now)
+        .bind(approval_id)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        if changed == 0 {
+            return Err(self.approval_transition_error(approval_id).await);
+        }
+        self.approval_row(approval_id).await
+    }
+
+    /// Flips `granted -> applied` before the granted operation executes.
+    /// Keeps the original human `decided_at`; only the supervisor writes it.
+    pub async fn mark_applied(&self, approval_id: &str) -> Result<ApprovalRow, StoreError> {
+        let _guard = self.write.lock().await;
+        let changed = sqlx::query(
+            "UPDATE approvals SET decision = 'applied'
+             WHERE id = ? AND decision = 'granted'",
+        )
+        .bind(approval_id)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        if changed == 0 {
+            return Err(self.approval_transition_error(approval_id).await);
+        }
+        self.approval_row(approval_id).await
+    }
+
+    /// Expires a still-`pending` row (cancel wins, restart-during-wait).
+    /// Records when the expiry happened in `decided_at`.
+    pub async fn expire(&self, approval_id: &str) -> Result<ApprovalRow, StoreError> {
+        let _guard = self.write.lock().await;
+        let now = Timestamp::now().as_micros();
+        let changed = sqlx::query(
+            "UPDATE approvals SET decision = 'expired', decided_at = ?
+             WHERE id = ? AND decision = 'pending'",
+        )
+        .bind(now)
+        .bind(approval_id)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        if changed == 0 {
+            return Err(self.approval_transition_error(approval_id).await);
+        }
+        self.approval_row(approval_id).await
+    }
+
+    /// Expires a `granted`-never-`applied` row (crash between `decide` and
+    /// `mark_applied`). Mirror of [`Self::expire`]: only the stated source
+    /// decision moves. Safe because nothing could have executed — execution
+    /// needs the waiter resolved after `applied` — so the continuation
+    /// re-asks under a fresh id.
+    pub async fn expire_granted(&self, approval_id: &str) -> Result<ApprovalRow, StoreError> {
+        let _guard = self.write.lock().await;
+        let now = Timestamp::now().as_micros();
+        let changed = sqlx::query(
+            "UPDATE approvals SET decision = 'expired', decided_at = ?
+             WHERE id = ? AND decision = 'granted'",
+        )
+        .bind(now)
+        .bind(approval_id)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        if changed == 0 {
+            return Err(self.approval_transition_error(approval_id).await);
+        }
+        self.approval_row(approval_id).await
+    }
+
+    /// Loads one approval row, or `None` when absent (gateway id -> task
+    /// resolution is a read; writes stay supervisor-owned).
+    pub async fn load_by_id(&self, approval_id: &str) -> Result<Option<ApprovalRow>, StoreError> {
+        sqlx::query_as::<_, ApprovalRow>(
+            "SELECT id, task_id, operation_hash, decision, decided_at
+             FROM approvals WHERE id = ?",
+        )
+        .bind(approval_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(StoreError::from)
+    }
+
+    /// All still-`pending` approval rows for one task, in insert order.
+    pub async fn load_pending_for_task(
+        &self,
+        task_id: &str,
+    ) -> Result<Vec<ApprovalRow>, StoreError> {
+        sqlx::query_as::<_, ApprovalRow>(
+            "SELECT id, task_id, operation_hash, decision, decided_at
+             FROM approvals WHERE task_id = ? AND decision = 'pending' ORDER BY rowid",
+        )
+        .bind(task_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::from)
+    }
+
+    /// All `granted`-never-`applied` approval rows for one task, in insert
+    /// order. Recovery expires these alongside stale pendings.
+    pub async fn load_granted_for_task(
+        &self,
+        task_id: &str,
+    ) -> Result<Vec<ApprovalRow>, StoreError> {
+        sqlx::query_as::<_, ApprovalRow>(
+            "SELECT id, task_id, operation_hash, decision, decided_at
+             FROM approvals WHERE task_id = ? AND decision = 'granted' ORDER BY rowid",
+        )
+        .bind(task_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::from)
+    }
+
+    /// Maps a zero-row approval transition to its typed error: missing row
+    /// or a row whose current state the transition does not accept.
+    async fn approval_transition_error(&self, approval_id: &str) -> StoreError {
+        match self.load_by_id(approval_id).await {
+            Ok(None) => StoreError::ApprovalNotFound {
+                approval_id: approval_id.to_owned(),
+            },
+            Ok(Some(row)) => StoreError::ApprovalWrongState {
+                approval_id: approval_id.to_owned(),
+                decision: row.decision,
+            },
+            Err(error) => error,
+        }
+    }
+
+    /// Loads a row that a successful transition just wrote; absence would
+    /// mean the journal lies, which fails closed as corruption.
+    async fn approval_row(&self, approval_id: &str) -> Result<ApprovalRow, StoreError> {
+        self.load_by_id(approval_id)
+            .await?
+            .ok_or_else(|| StoreError::Corrupt {
+                detail: format!("approval {approval_id} vanished mid-transition"),
+            })
+    }
 }
 
 #[cfg(test)]
@@ -345,6 +672,10 @@ mod tests {
     use super::StoreWriter;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Duration;
+    use tokio::sync::broadcast::Receiver;
+
+    type Commit = (String, i64);
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -354,6 +685,147 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let store = StoreWriter::open(&dir).await.unwrap();
         (store, dir)
+    }
+
+    /// Awaits one commit notification, failing loudly instead of hanging.
+    async fn next_commit(rx: &mut Receiver<Commit>) -> Commit {
+        tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("commit notification timed out")
+            .expect("commit notification channel closed")
+    }
+
+    #[tokio::test]
+    async fn successful_commits_notify_subscribers_with_task_and_seq() {
+        let (store, dir) = open_test_store().await;
+        store.create_session("s").await.unwrap();
+        let mut rx = store.subscribe_commits();
+
+        store
+            .create_task("t", "s", "w", "obj", "Created", "{}", "{}")
+            .await
+            .unwrap();
+        assert_eq!(next_commit(&mut rx).await, ("t".to_owned(), 0));
+
+        let seq = store.append_event("t", "message", "{}").await.unwrap();
+        assert_eq!(seq, 1);
+        assert_eq!(next_commit(&mut rx).await, ("t".to_owned(), 1));
+
+        let seq = store
+            .append_transition(
+                "t",
+                "status",
+                "{}",
+                super::TransitionState {
+                    status: "Completed",
+                    revision: 1,
+                    snapshot_json: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(seq, 2);
+        assert_eq!(next_commit(&mut rx).await, ("t".to_owned(), 2));
+
+        store.close().await;
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_commit_sends_no_notification() {
+        let (store, dir) = open_test_store().await;
+        store.create_session("s").await.unwrap();
+        store
+            .create_task("t", "s", "w", "obj", "Created", "{}", "{}")
+            .await
+            .unwrap();
+        let mut rx = store.subscribe_commits();
+
+        // Force the projection half of the commit to abort so the whole
+        // transaction rolls back after the journal insert.
+        sqlx::query("CREATE TRIGGER fault_projection BEFORE UPDATE OF status ON tasks BEGIN SELECT RAISE(ABORT, 'injected projection failure'); END")
+            .execute(&store.pool).await.unwrap();
+        let result = store
+            .append_transition(
+                "t",
+                "verification_finished",
+                "{}",
+                super::TransitionState {
+                    status: "Completed",
+                    revision: 1,
+                    snapshot_json: None,
+                },
+            )
+            .await;
+        assert!(result.is_err(), "injected fault must fail the commit");
+        assert!(
+            matches!(
+                rx.try_recv(),
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+            ),
+            "a rolled-back commit must not notify subscribers"
+        );
+
+        // The rollback must not wedge the channel: the next real commit
+        // still notifies, with the sequence it actually committed.
+        sqlx::query("DROP TRIGGER fault_projection")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        let seq = store.append_event("t", "message", "{}").await.unwrap();
+        assert_eq!(next_commit(&mut rx).await, ("t".to_owned(), seq));
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+
+        store.close().await;
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn lagged_receiver_catches_up_from_the_journal_by_cursor() {
+        let (store, dir) = open_test_store().await;
+        store.create_session("s").await.unwrap();
+        store
+            .create_task("t", "s", "w", "obj", "Created", "{}", "{}")
+            .await
+            .unwrap();
+        let mut rx = store.subscribe_commits();
+
+        // Commit past the broadcast capacity without ever reading, so the
+        // receiver's wakeup is genuinely lost rather than merely delayed.
+        let extra = super::COMMIT_NOTIFICATION_CAPACITY + 8;
+        for _ in 0..extra {
+            store.append_event("t", "message", "{}").await.unwrap();
+        }
+        match tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("commit notification timed out")
+        {
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
+                assert!(missed > 0, "the receiver must be told it fell behind");
+            }
+            other => panic!("expected a lagged receiver, got {other:?}"),
+        }
+
+        // Catch-up is a cursor read of the journal: every committed event is
+        // still there, in order, gapless.
+        let rows = store.load_events_since("t", -1).await.unwrap();
+        let seqs: Vec<i64> = rows.iter().map(|row| row.seq).collect();
+        let expected: Vec<i64> = (0..=i64::try_from(extra).expect("extra fits i64")).collect();
+        assert_eq!(seqs, expected, "journal must hold every committed event");
+
+        // And the receiver keeps working after the lag.
+        while !matches!(
+            rx.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ) {}
+        let seq = store.append_event("t", "message", "{}").await.unwrap();
+        assert_eq!(next_commit(&mut rx).await, ("t".to_owned(), seq));
+
+        store.close().await;
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]
@@ -431,5 +903,204 @@ mod tests {
         assert!(store.incomplete_tasks().await.unwrap().is_empty());
         store.close().await;
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn journal_and_completion_projection_commit_together() {
+        let (store, dir) = open_test_store().await;
+        store.create_session("s").await.unwrap();
+        store
+            .create_task("t", "s", "w", "obj", "Created", "{}", "{}")
+            .await
+            .unwrap();
+        let seq = store
+            .append_transition(
+                "t",
+                "verification_finished",
+                "{}",
+                super::TransitionState {
+                    status: "Completed",
+                    revision: 3,
+                    snapshot_json: Some("{\"verified\":true}"),
+                },
+            )
+            .await
+            .unwrap();
+        let row = store.load_task("t").await.unwrap().unwrap();
+        assert_eq!(row.status, "Completed");
+        assert_eq!(row.revision, 3);
+        assert_eq!(row.snapshot_seq, Some(seq));
+        assert_eq!(row.snapshot_json.as_deref(), Some("{\"verified\":true}"));
+        assert_eq!(store.load_events_since("t", 0).await.unwrap().len(), 1);
+        assert!(store.incomplete_tasks().await.unwrap().is_empty());
+        store.close().await;
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn projection_failure_rolls_back_the_acceptance_event() {
+        let (store, dir) = open_test_store().await;
+        store.create_session("s").await.unwrap();
+        store
+            .create_task("t", "s", "w", "obj", "Created", "{}", "{}")
+            .await
+            .unwrap();
+        sqlx::query("CREATE TRIGGER fault_projection BEFORE UPDATE OF status ON tasks BEGIN SELECT RAISE(ABORT, 'injected projection failure'); END")
+            .execute(&store.pool).await.unwrap();
+        assert!(
+            store
+                .append_transition(
+                    "t",
+                    "verification_finished",
+                    "{}",
+                    super::TransitionState {
+                        status: "Completed",
+                        revision: 1,
+                        snapshot_json: Some("{\"verified\":true}"),
+                    }
+                )
+                .await
+                .is_err()
+        );
+        let row = store.load_task("t").await.unwrap().unwrap();
+        assert_eq!(row.status, "Created");
+        assert_eq!(row.revision, 0);
+        assert_eq!(row.snapshot_seq, Some(0));
+        assert!(store.load_events_since("t", 0).await.unwrap().is_empty());
+        assert_eq!(store.incomplete_tasks().await.unwrap(), vec!["t"]);
+        store.close().await;
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    // ---- M11 D4: approval row machine (5-column schema, no migration) ----
+
+    #[tokio::test]
+    async fn approval_row_lifecycle_pending_granted_applied() {
+        let (store, dir) = open_test_store().await;
+        store.create_session("s").await.unwrap();
+        store
+            .create_task("t", "s", "w", "obj", "Created", "{}", "{}")
+            .await
+            .unwrap();
+
+        store
+            .insert_pending("ap-1", "t", "hash-op-1")
+            .await
+            .unwrap();
+        let row = store.load_by_id("ap-1").await.unwrap().unwrap();
+        assert_eq!(row.id, "ap-1");
+        assert_eq!(row.task_id, "t");
+        assert_eq!(row.operation_hash, "hash-op-1");
+        assert_eq!(row.decision, "pending");
+        assert_eq!(row.decided_at, 0, "pending rows carry decided_at = 0");
+        let pending = store.load_pending_for_task("t").await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, "ap-1");
+
+        let granted = store
+            .decide("ap-1", super::ApprovalOutcome::Granted)
+            .await
+            .unwrap();
+        assert_eq!(granted.decision, "granted");
+        assert!(
+            granted.decided_at > 0,
+            "a decision records a wall-clock time"
+        );
+        assert!(store.load_pending_for_task("t").await.unwrap().is_empty());
+
+        let applied = store.mark_applied("ap-1").await.unwrap();
+        assert_eq!(applied.decision, "applied");
+        assert_eq!(
+            applied.decided_at, granted.decided_at,
+            "applied keeps the human decision time"
+        );
+        assert!(store.load_pending_for_task("t").await.unwrap().is_empty());
+
+        store.close().await;
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn approval_double_decide_and_unknown_id_are_typed_errors() {
+        let (store, dir) = open_test_store().await;
+        store.create_session("s").await.unwrap();
+        store
+            .create_task("t", "s", "w", "obj", "Created", "{}", "{}")
+            .await
+            .unwrap();
+
+        // Unknown id: typed not-found, not a silent no-op.
+        let missing = store
+            .decide("nope", super::ApprovalOutcome::Granted)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(missing, super::StoreError::ApprovalNotFound { .. }),
+            "got {missing:?}"
+        );
+        assert!(store.load_by_id("nope").await.unwrap().is_none());
+
+        store.insert_pending("ap-1", "t", "h").await.unwrap();
+        store
+            .decide("ap-1", super::ApprovalOutcome::Granted)
+            .await
+            .unwrap();
+        // Double decide: typed error, first decision preserved verbatim.
+        let second = store
+            .decide("ap-1", super::ApprovalOutcome::Denied)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                second,
+                super::StoreError::ApprovalWrongState { ref decision, .. } if decision == "granted"
+            ),
+            "got {second:?}"
+        );
+        let row = store.load_by_id("ap-1").await.unwrap().unwrap();
+        assert_eq!(row.decision, "granted");
+
+        store.close().await;
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn approval_expire_only_leaves_pending_and_blocks_later_decisions() {
+        let (store, dir) = open_test_store().await;
+        store.create_session("s").await.unwrap();
+        store
+            .create_task("t", "s", "w", "obj", "Created", "{}", "{}")
+            .await
+            .unwrap();
+
+        store.insert_pending("ap-1", "t", "h").await.unwrap();
+        // mark_applied must not work on a row that was never granted.
+        let premature = store.mark_applied("ap-1").await.unwrap_err();
+        assert!(
+            matches!(
+                premature,
+                super::StoreError::ApprovalWrongState { ref decision, .. } if decision == "pending"
+            ),
+            "got {premature:?}"
+        );
+
+        let expired = store.expire("ap-1").await.unwrap();
+        assert_eq!(expired.decision, "expired");
+        assert!(expired.decided_at > 0, "expiry is recorded, pending was 0");
+        // Expiring twice and deciding an expired row are typed errors.
+        let again = store.expire("ap-1").await.unwrap_err();
+        assert!(matches!(
+            again,
+            super::StoreError::ApprovalWrongState { .. }
+        ));
+        let late = store
+            .decide("ap-1", super::ApprovalOutcome::Granted)
+            .await
+            .unwrap_err();
+        assert!(matches!(late, super::StoreError::ApprovalWrongState { .. }));
+        assert!(store.load_pending_for_task("t").await.unwrap().is_empty());
+
+        store.close().await;
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -11,6 +11,7 @@ members = [
     "crates/tachyon-retrieval",
     "crates/tachyon-models",
     "crates/tachyon-judgment",
+    "crates/tachyon-mutation",
     "crates/tachyon-router",
     "crates/tachyon-scheduler",
     "crates/tachyon-verify",

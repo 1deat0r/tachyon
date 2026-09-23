@@ -12,4 +12,6 @@ mod server;
 pub mod transport;
 
 pub use endpoint::{ClaimPaths, EndpointInfo, claim_runtime_dir, read_endpoint_info};
-pub use server::{GatewayError, RunningGateway, start};
+pub use server::{
+    FAKE_PROVIDER_LABEL, GatewayError, GatewayRuntime, RunningGateway, start, start_with,
+};

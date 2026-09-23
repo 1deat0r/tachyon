@@ -38,7 +38,7 @@ fn workspace_local_read_write_automatic() {
 #[test]
 fn outside_workspace_write_needs_approval() {
     let root = scratch("outside");
-    let mut context = test_context(&root);
+    let context = test_context(&root);
     let outside = root
         .join("..")
         .join(format!("tachyon-m3-ext-{}", std::process::id()));
@@ -201,4 +201,28 @@ fn registry_lists_native_capabilities() {
             .get(&tachyon_types::CapabilityId("nope".to_owned()))
             .is_none()
     );
+}
+
+/// Symlinked roots must not silently miss policy scopes: the context stores
+/// the canonical root so scope resolution (which strips it from canonical
+/// file paths) agrees. Reproduces the macOS /var → /private/var miss.
+#[cfg(unix)]
+#[test]
+fn symlinked_root_keeps_deny_scope() {
+    use std::os::unix::fs::symlink;
+    let base = scratch("symlink-base");
+    let real = base.join("real-ws");
+    std::fs::create_dir_all(&real).unwrap();
+    let via = base.join("via-link");
+    symlink(&real, &via).unwrap();
+    let mut policy = Policy::trusted_workspace();
+    policy.deny("fs.read", "workspace/secret.rs");
+    let context = ToolsContext::new(via, policy, ArtifactSpool::new(base.join("artifacts")));
+    std::fs::write(real.join("secret.rs"), b"secret").unwrap();
+    let err = tachyon_tools::fs::read(&context, Path::new("secret.rs")).unwrap_err();
+    assert!(
+        err.to_string().contains("enied"),
+        "symlinked deny must hold, got: {err}"
+    );
+    let _ = std::fs::remove_dir_all(&base);
 }

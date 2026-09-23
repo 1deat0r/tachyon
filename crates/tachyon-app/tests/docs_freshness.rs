@@ -76,6 +76,12 @@ const IMPLEMENTED: &[&str] = &[
     "tachyon-repo",
     "tachyon-router",
     "tachyon-telemetry",
+    "tachyon-retrieval",
+    "tachyon-models",
+    "tachyon-judgment",
+    "tachyon-mutation",
+    "tachyon-verify",
+    "tachyon-tui",
 ];
 
 #[test]
