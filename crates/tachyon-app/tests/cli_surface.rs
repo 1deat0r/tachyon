@@ -33,16 +33,20 @@ fn scratch(tag: &str) -> PathBuf {
 fn write_config(dir: &Path, provider: bool) -> PathBuf {
     let data = dir.join("data");
     std::fs::create_dir_all(&data).unwrap();
-    let json = if provider {
-        format!(
-            r#"{{"data_dir":"{}","log_level":"warn","provider":{{"kind":"fake","model":"scripted-replay-1"}}}}"#,
-            data.display()
-        )
-    } else {
-        format!(r#"{{"data_dir":"{}","log_level":"warn"}}"#, data.display())
-    };
+    // serde_json so Windows backslashes in data_dir are escaped — raw
+    // display() interpolation produces invalid JSON (`\U` escape).
+    let mut root = serde_json::json!({
+        "data_dir": data.display().to_string(),
+        "log_level": "warn",
+    });
+    if provider {
+        root["provider"] = serde_json::json!({
+            "kind": "fake",
+            "model": "scripted-replay-1",
+        });
+    }
     let path = dir.join("config.json");
-    std::fs::write(&path, json).unwrap();
+    std::fs::write(&path, serde_json::to_vec_pretty(&root).unwrap()).unwrap();
     path
 }
 
