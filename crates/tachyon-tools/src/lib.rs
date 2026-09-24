@@ -6,6 +6,7 @@
 
 pub mod artifact;
 pub mod credential;
+pub mod fault;
 pub mod fs;
 pub mod git;
 pub mod process;

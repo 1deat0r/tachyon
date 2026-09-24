@@ -80,6 +80,8 @@ Implement these only after the MVP exit gate or an approved ADR.
 
 ## Agent skills
 
+Skeleton: v1 — 2026-09-24
+
 ### Issue tracker
 
 Issues and specs live on GitHub (`1deat0r/tachyon`) via the `gh` CLI. See `docs/agents/issue-tracker.md`.

@@ -71,6 +71,12 @@ pub enum StoreError {
         /// The row's current decision state.
         decision: String,
     },
+    /// No effect row with this id exists.
+    #[error("effect not found: {effect_id}")]
+    EffectNotFound {
+        /// Requested effect id.
+        effect_id: String,
+    },
 }
 
 /// One row of the 5-column `approvals` table (M11 D4: no migration).
@@ -86,6 +92,25 @@ pub struct ApprovalRow {
     pub decision: String,
     /// Decision time (micros since epoch); 0 while `pending`.
     pub decided_at: i64,
+}
+
+/// One row of the `effects` table (M12 §19 crash reconciliation).
+#[derive(Clone, Debug, PartialEq, Eq, FromRow)]
+pub struct EffectRow {
+    /// Effect id (unique per attempt; doubles as the idempotency key for Keyed effects).
+    pub id: String,
+    /// Owning task id.
+    pub task_id: String,
+    /// Effect class name (spec §19 `EffectClass`).
+    pub effect_class: String,
+    /// Idempotency name (spec §19 `Idempotency`).
+    pub idempotency: String,
+    /// Row state: `prepared`, `committed`, or `unknown_after_crash`.
+    pub state: String,
+    /// Receipt / query result once committed.
+    pub receipt: Option<String>,
+    /// Last transition time (micros since epoch).
+    pub updated_at: i64,
 }
 
 /// The two human decisions a pending approval row accepts (M11 item 8):
@@ -663,6 +688,128 @@ impl StoreWriter {
             .await?
             .ok_or_else(|| StoreError::Corrupt {
                 detail: format!("approval {approval_id} vanished mid-transition"),
+            })
+    }
+
+    /// Records an effect at the `EffectPrepared` barrier (spec §19):
+    /// durable before the consequential action runs.
+    pub async fn insert_effect_prepared(
+        &self,
+        effect_id: &str,
+        task_id: &str,
+        effect_class: &str,
+        idempotency: &str,
+    ) -> Result<(), StoreError> {
+        let _guard = self.write.lock().await;
+        let now = Timestamp::now().as_micros();
+        sqlx::query(
+            "INSERT INTO effects (id, task_id, effect_class, idempotency, state, receipt, updated_at)
+             VALUES (?, ?, ?, ?, 'prepared', NULL, ?)",
+        )
+        .bind(effect_id)
+        .bind(task_id)
+        .bind(effect_class)
+        .bind(idempotency)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Records `EffectCommitted` with a receipt: only a `prepared` row
+    /// accepts the flip; anything else is a typed not-found/wrong-state.
+    pub async fn commit_effect(
+        &self,
+        effect_id: &str,
+        receipt: &str,
+    ) -> Result<EffectRow, StoreError> {
+        let _guard = self.write.lock().await;
+        let now = Timestamp::now().as_micros();
+        let changed = sqlx::query(
+            "UPDATE effects SET state = 'committed', receipt = ?, updated_at = ?
+             WHERE id = ? AND state = 'prepared'",
+        )
+        .bind(receipt)
+        .bind(now)
+        .bind(effect_id)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        if changed == 0 {
+            return Err(self.effect_transition_error(effect_id).await);
+        }
+        self.effect_row(effect_id).await
+    }
+
+    /// Marks a still-`prepared` row `unknown_after_crash` (spec §19
+    /// NonIdempotent/Unknown). Recovery never blindly replays these.
+    pub async fn mark_effect_unknown_after_crash(
+        &self,
+        effect_id: &str,
+    ) -> Result<EffectRow, StoreError> {
+        let _guard = self.write.lock().await;
+        let now = Timestamp::now().as_micros();
+        let changed = sqlx::query(
+            "UPDATE effects SET state = 'unknown_after_crash', updated_at = ?
+             WHERE id = ? AND state = 'prepared'",
+        )
+        .bind(now)
+        .bind(effect_id)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        if changed == 0 {
+            return Err(self.effect_transition_error(effect_id).await);
+        }
+        self.effect_row(effect_id).await
+    }
+
+    /// All effect rows for one task, in insert order (recovery input).
+    pub async fn load_effects_for_task(&self, task_id: &str) -> Result<Vec<EffectRow>, StoreError> {
+        sqlx::query_as::<_, EffectRow>(
+            "SELECT id, task_id, effect_class, idempotency, state, receipt, updated_at
+             FROM effects WHERE task_id = ? ORDER BY rowid",
+        )
+        .bind(task_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::from)
+    }
+
+    /// Loads one effect row by id.
+    pub async fn load_effect(&self, effect_id: &str) -> Result<Option<EffectRow>, StoreError> {
+        sqlx::query_as::<_, EffectRow>(
+            "SELECT id, task_id, effect_class, idempotency, state, receipt, updated_at
+             FROM effects WHERE id = ?",
+        )
+        .bind(effect_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(StoreError::from)
+    }
+
+    /// Maps a zero-row effect transition to a typed error.
+    async fn effect_transition_error(&self, effect_id: &str) -> StoreError {
+        match self.load_effect(effect_id).await {
+            Ok(None) => StoreError::EffectNotFound {
+                effect_id: effect_id.to_owned(),
+            },
+            Ok(Some(row)) => StoreError::Corrupt {
+                detail: format!(
+                    "effect {effect_id} in state {} does not accept this transition",
+                    row.state
+                ),
+            },
+            Err(error) => error,
+        }
+    }
+
+    /// Loads a row that a successful effect transition just wrote.
+    async fn effect_row(&self, effect_id: &str) -> Result<EffectRow, StoreError> {
+        self.load_effect(effect_id)
+            .await?
+            .ok_or_else(|| StoreError::Corrupt {
+                detail: format!("effect {effect_id} vanished mid-transition"),
             })
     }
 }

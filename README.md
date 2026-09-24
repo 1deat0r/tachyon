@@ -8,9 +8,9 @@ genuine unresolved uncertainty.
 
 > LLMs are reasoning accelerators, not Tachyon's operating system.
 
-**Status (Sep 2026):** early implementation. Milestone 11
-(TUI + live gateway events + run path) is implemented, code board pending;
-see [`PROGRESS.md`](PROGRESS.md). Not yet a daily
+**Status (Sep 2026):** early implementation. Milestone 12
+(recovery hardening) is implemented and gated; see
+[`PROGRESS.md`](PROGRESS.md). Not yet a daily
 driver — watch this repo if the architecture interests you.
 
 ## Quickstart
@@ -40,9 +40,9 @@ tachyon task list
 - **Predictive routing** — cheapest sufficient path first, not a model loop.
 - **Verification-gated completion** — done means proven, not self-reported.
 
-Read [`README_FOR_HERMES.md`](README_FOR_HERMES.md) for the implementing-agent
-view, then `docs/` in numeric order: charter → architecture freeze →
-implementation spec → adversarial review → plan → acceptance → security.
+Start with [`AGENTS.md`](AGENTS.md), then `docs/` in numeric order: charter →
+architecture freeze → implementation spec → adversarial review → plan →
+acceptance → security.
 
 ## Contributing
 

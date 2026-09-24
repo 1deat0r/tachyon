@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Milestone 12: recovery hardening (env-gated fault points, effect
+  fixture with §19 reconcile, driver re-entry / fresh-id re-ask,
+  gateway SIGKILL restart test, six-domain seam gates) with the §42
+  seven-point coverage matrix in `M12_REPORT.md`.
 - Bare `tachyon` (no subcommand) opens the TUI (`attach`) instead of
   printing help, matching spec §38's first-class `tachyon` command.
 - Milestone 11: TUI + live gateway events + run path (protocol v2

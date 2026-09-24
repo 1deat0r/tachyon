@@ -2,7 +2,6 @@
 
 Before implementation starts:
 
-- [ ] Read `README_FOR_HERMES.md`.
 - [ ] Read `AGENTS.md`.
 - [ ] Read docs 00–08.
 - [ ] Confirm Rust 1.98.1 toolchain.

@@ -467,6 +467,8 @@ async fn stage_model(
     provider: &Arc<dyn ModelProvider>,
     plan: &RunPlan,
 ) -> Result<(Vec<ProposedFile>, ModelUsage), DriveError> {
+    // M12 fault point: kill here = model-call enter with no committed result.
+    tachyon_tools::fault::reach("model.enter").await;
     proposer
         .propose(RunRecord::Stage {
             stage: "model".into(),

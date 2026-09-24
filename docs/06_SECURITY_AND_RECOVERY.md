@@ -123,3 +123,7 @@ Automated tests must cover:
 A tool/provider failure should fail the node/task according to policy, not crash the whole gateway.
 
 A detected core invariant violation may terminate the process deliberately rather than continuing with possibly corrupt state; durable recovery must then reconstruct tasks from journal/snapshot.
+
+## Fault points (M12 / ADR 0001)
+
+Named holds compiled into production seams (`evidence.read`, `model.enter`, `mutation.commit`, `verify.command`, `approval.park`). They are **no-ops unless** `TACHYON_FAULT_POINT` matches the seam name (cached env read). Tests arm the env var, wait for the child to park, then `Child::kill()` to prove crash recovery. Controlling the gateway's environment already implies controlling the process; the holds add no new privilege.

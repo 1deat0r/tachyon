@@ -322,6 +322,8 @@ impl MutationEngine {
                     path: file.path.clone(),
                 });
             }
+            // M12 fault point: kill after rename, before FileCommitted journal.
+            tachyon_tools::fault::reach_blocking("mutation.commit");
             self.journal.append(&JournalRecord::FileCommitted {
                 batch_id: prepared.id,
                 path: file.path.clone(),
