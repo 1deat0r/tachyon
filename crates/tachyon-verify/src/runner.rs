@@ -273,6 +273,9 @@ impl CheckRunner {
                 .collect(),
             timeout: Duration::from_millis(command.timeout_ms),
         };
+        // M12 fault point: arm before the child spawns so a kill lands
+        // with the verify command not yet started (no false Completed).
+        tachyon_tools::fault::reach("verify.command").await;
         let receipt = run_cancellable(&self.context, &spec, cancel)
             .await
             .map_err(|error| VerifyError::Blocked(error.to_string()))?;

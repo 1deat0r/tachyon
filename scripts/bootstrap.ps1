@@ -13,4 +13,4 @@ cargo fmt --check
 cargo check --workspace
 cargo test --workspace
 
-Write-Host "Tachyon scaffold validated. Read README_FOR_HERMES.md and begin Milestone 0."
+Write-Host "Tachyon scaffold validated. Read AGENTS.md and docs/04_IMPLEMENTATION_PLAN.md, then begin Milestone 0."

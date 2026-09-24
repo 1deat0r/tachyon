@@ -150,21 +150,21 @@ async fn restart_during_approval_wait_recovers_expires_and_refuses_typed() {
     .await;
     assert_eq!(code_of(&got), "approval_not_pending", "{got}");
 
-    // --- continuation attempt: `Resume` must not manufacture a fresh
-    //     approval_request or silently grant anything. Amended M11
-    //     scope (code R1 board, 2026-09-23): the gateway's run policy
-    //     never Asks (no protocol-driven park) and this task was parked
-    //     by the supervisor API with no run to re-enter, so `Resume`
-    //     refuses a Recovering task; the fresh-id leg moves to M12 with
-    //     driver re-entry. This
-    //     pins both halves of "decision still required after every
-    //     restart" without faking a leg the code cannot reach. ---
+    // --- continuation: no workspace pin means no run to re-enter, so
+    //     `Resume` lands `Recovering → Paused` (ADR 0002). It must not
+    //     manufacture a fresh `approval_request` or silently grant. The
+    //     fresh-id + driver-re-entry leg lives in `reentry.rs` (run case). ---
     let before = approval_request_count(&socket, task_id).await;
     let resume = send(&socket, Command::ResumeTask { task_id }).await;
     assert_eq!(
-        resume.0, 400,
-        "M11 Resume refuses a Recovering task (amended scope — re-entry is M12): {:?}",
+        resume.0, 200,
+        "M12 Resume on Recovering with no run lands Paused: {:?}",
         resume.2
+    );
+    let after_state = ok(&socket, Command::GetTask { task_id }).await;
+    assert_eq!(
+        after_state["task"]["status"], "Paused",
+        "Recovering with no pin transitions to Paused"
     );
     let after = approval_request_count(&socket, task_id).await;
     assert_eq!(

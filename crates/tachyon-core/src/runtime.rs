@@ -204,6 +204,8 @@ pub fn collect_evidence(
         if total > bounds.max_evidence_bytes_per_stage {
             return Err(RuntimeError::EvidenceTooLarge(total));
         }
+        // M12 fault point: kill here = native read with no committed result.
+        tachyon_tools::fault::reach_blocking("evidence.read");
         let bytes = std::fs::read(&resolved).map_err(|err| RuntimeError::Io(err.to_string()))?;
         let rel = normalize_key(&request.path)?;
         items.push(EvidenceItem {

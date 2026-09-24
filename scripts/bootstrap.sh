@@ -16,4 +16,4 @@ cargo fmt --check
 cargo check --workspace
 cargo test --workspace
 
-echo "Tachyon scaffold validated. Read README_FOR_HERMES.md and begin Milestone 0."
+echo "Tachyon scaffold validated. Read AGENTS.md and docs/04_IMPLEMENTATION_PLAN.md, then begin Milestone 0."

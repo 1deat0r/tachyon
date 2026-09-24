@@ -14,7 +14,7 @@ Authoritative deeper contracts: `docs/01_ARCHITECTURE_FREEZE.md`, `docs/02_IMPLE
 | **Task** | Executable unit of work with a durable status machine. |
 | **CLI** | `tachyon` binary (`tachyon-app`). Argument parsing, config, output. No decision logic. |
 | **TUI** | Ratatui client (`tachyon-tui`). Pure gateway client (AD-014): display + input only. |
-| **Shared driver** | The ONE run path spawned by the gateway (`StartRun` → `drive`). CLI/TUI never spawn their own. |
+| **Shared driver** | The ONE run path spawned by the gateway (`StartRun` → `drive`). CLI/TUI never spawn their own. Runs are never respawned at gateway boot without **driver re-entry**. |
 
 ## Execution and state
 
@@ -26,7 +26,11 @@ Authoritative deeper contracts: `docs/01_ARCHITECTURE_FREEZE.md`, `docs/02_IMPLE
 | **Commit barrier** | Point where irreversible/ambiguous effects become durable under policy. |
 | **Durable journal** | Append-only event log; source of truth for recovery. Snapshots are materializations, not the sole truth. |
 | **TaskStatus** | Canonical enum: `Created`, `Routing`, `Planning`, `Executing`, `Verifying`, `WaitingApproval`, `Paused`, `Recovering`, `Completed`, `Failed`, `Cancelled`. |
-| **Recovering** | Status while a gateway/supervisor rebuilds state after restart; not a silent resume of unknown effects. |
+| **Recovering** | Status while a gateway/supervisor rebuilds state after restart; not a silent resume of unknown effects. Awaiting user go-ahead. |
+| **Driver re-entry** | User-triggered (`Resume` on `Recovering`) respawn of the in-flight run's driver; never automatic at gateway boot. A `Recovering` task with no run to re-enter transitions to `Paused` instead. |
+| **Fresh-id re-ask** | After restart, a continuation approval always issues a new approval id; the pre-restart id stays dead (expired or consumed), never reused or silently granted. |
+| **Fault point** | Named hold built into production code, armed only by env (`TACHYON_FAULT_POINT`); lets a test stop a process at an exact commit seam, kill it, and assert reconcile after restart. No-op unless armed. |
+| **Effect fixture** | Minimal keyed/queryable external-effect executor whose only job is proving spec §19 crash reconcile: `effects.state` `prepared` → `committed` around the remote call; recovery classifies interrupted rows. Not a general effect protocol. |
 | **Workspace pin / canonical root** | One durable canonical filesystem root for a run; policy, evidence, and mutation all read that same value (no second resolution). |
 | **Workspace lease** | Exclusive claim on a canonical workspace root for the life of a run (`workspace_busy` when contended). |
 
@@ -63,4 +67,8 @@ Use crate names when the boundary matters: `tachyon-core` (supervisor/state), `t
 | "permission" | **capability** |
 | "done" without evidence | **verification gate passed** / **Completed** |
 | "restart resume" for unknown effects | **Recovering** + reconcile (never blind replay) |
+| "auto-resume on restart" | **driver re-entry** (user-triggered only) |
+| "hold point" / "breakpoint" | **fault point** |
+| "re-ask the approval" after restart | **fresh-id re-ask** |
+| "effect protocol" for the M12 fixture | **effect fixture** (full protocol deferred) |
 | "MCP call" for in-process tools | **native tool** (MCP is external boundary only) |

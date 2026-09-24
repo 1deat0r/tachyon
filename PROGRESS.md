@@ -4,9 +4,25 @@ This file is updated by the implementing agent after every milestone.
 
 ## Current milestone
 
-Milestone 12 — next (Milestone 11 complete, see gates below)
+Milestone 13 — next (Milestone 12 complete, see gates below)
 
 ## Completed gates
+
+- 2026-09-24 Milestone 12 — Recovery hardening: env-gated fault points
+  (`TACHYON_FAULT_POINT`, ADR 0001) at evidence/model/mutation/verify/
+  approval seams; effect fixture writing `effects.state` prepared→
+  committed with production `recover_task` §19 reconcile (Keyed/
+  Queryable stay prepared; NonIdempotent/Unknown →
+  `unknown_after_crash`); driver re-entry (ADR 0002): `Resume` on
+  `Recovering` with pin respawns `start_run`, without pin lands
+  `Paused`, continuation approvals use fresh ids; checked-in gateway
+  SIGKILL restart test (`tachyon-app` kill_restart); six-domain seam
+  gates; M11 restart_approval flip to Paused. Spec §42 seven-point
+  matrix in `docs/milestones/M12_REPORT.md`. Tests: fault-point units,
+  6 effect-fixture, 2 reentry, 6 seam gates, kill_restart, full
+  workspace green; `fmt`, `check`, strict `clippy` clean. Deferred →
+  follow-up: general effect journal protocol + node-level
+  `UnknownAfterCrash`. Report: `docs/milestones/M12_REPORT.md`.
 
 - 2026-09-23 Milestone 11 — TUI + live gateway events + run path:
   protocol v2 tagged `ServerFrame` with `Subscribe` streaming (ack +

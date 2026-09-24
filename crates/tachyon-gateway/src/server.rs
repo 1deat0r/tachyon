@@ -1000,14 +1000,7 @@ async fn handle_command(state: &Arc<GatewayState>, command: &Command) -> Command
             )
             .await
         }
-        Command::ResumeTask { task_id } => {
-            mutate(
-                state,
-                *task_id,
-                |handle| async move { handle.resume().await },
-            )
-            .await
-        }
+        Command::ResumeTask { task_id } => resume_task(state, *task_id).await,
         Command::CancelTask { task_id } => {
             // Cancellation drain first: fire the ACTIVE run's token so
             // the driver halts at its next stage boundary while the
@@ -1272,6 +1265,33 @@ async fn decide(
         Err(result) => return result,
     };
     ok(json!({"task": task}))
+}
+
+/// `Resume` dispatch (ADR 0002): `Recovering` with a durable workspace pin
+/// means an in-flight run to re-enter — respawn the shared driver through
+/// the normal [`start_run`] path (pin is set-once/same-root idempotent).
+/// `Recovering` without a pin has no run: the supervisor moves it to
+/// `Paused`. Every other status uses the existing resume path.
+async fn resume_task(state: &Arc<GatewayState>, task_id: TaskId) -> CommandResult {
+    let handle = match supervisor_for(state, task_id).await {
+        Ok(handle) => handle,
+        Err(result) => return result,
+    };
+    let current = match handle.get_state().await {
+        Ok(task) => task,
+        Err(error) => return core_err(&error),
+    };
+    if current.status == TaskStatus::Recovering
+        && let Some(root) = current.workspace_root.clone()
+    {
+        return start_run(state, task_id, &root, None).await;
+    }
+    mutate(
+        state,
+        task_id,
+        |handle| async move { handle.resume().await },
+    )
+    .await
 }
 
 /// Admits `Command::StartRun` (plan items 5, 6, 9).

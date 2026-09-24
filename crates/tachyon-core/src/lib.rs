@@ -865,6 +865,22 @@ pub async fn recover_task(
     for row in store.load_granted_for_task(&task_id.to_string()).await? {
         store.expire_granted(&row.id).await?;
     }
+    // M12 §19: reconcile still-`prepared` effect rows by idempotency
+    // class. Keyed/Queryable/Compensatable stay `prepared` for the
+    // re-entry path to retry or inspect; NonIdempotent/Unknown — and any
+    // unrecognized class — become `unknown_after_crash` and are never
+    // blindly replayed (fail-safe default).
+    for effect in store.load_effects_for_task(&task_id.to_string()).await? {
+        if effect.state != "prepared" {
+            continue;
+        }
+        match effect.idempotency.as_str() {
+            "Keyed" | "Queryable" | "Compensatable" | "Idempotent" | "Pure" => {}
+            _ => {
+                store.mark_effect_unknown_after_crash(&effect.id).await?;
+            }
+        }
+    }
     // The journal tail, not stale task-row metadata, is recovery truth.
     state.updated_at = Timestamp::now();
     let interrupted = state.verification.as_ref().is_some_and(|v| v.in_progress);
@@ -1360,15 +1376,19 @@ impl Loop {
                 "control acknowledgement is still draining owned effect workers".into(),
             ));
         }
-        if self.state.status != TaskStatus::Paused {
-            return Err(CoreError::IllegalTransition {
-                from: self.state.status,
+        match self.state.status {
+            // Milestone 2's scheduler will resume into Executing; until then
+            // the only live status is Created.
+            TaskStatus::Paused => self.move_to(TaskStatus::Created).await,
+            // ADR 0002: no in-flight run to re-enter — land in Paused so
+            // the normal Paused path applies. In-flight re-entry is the
+            // gateway's ResumeTask handler (respawns drive), not here.
+            TaskStatus::Recovering => self.move_to(TaskStatus::Paused).await,
+            from => Err(CoreError::IllegalTransition {
+                from,
                 to: TaskStatus::Created,
-            });
+            }),
         }
-        // Milestone 2's scheduler will resume into Executing; until then the
-        // only live status is Created.
-        self.move_to(TaskStatus::Created).await
     }
 
     /// Durable set-once workspace pin (M11 item 5): same root again is
@@ -1558,6 +1578,8 @@ impl Loop {
         request: tachyon_policy::ApprovalRequest,
         resolution: oneshot::Sender<ApprovalResolution>,
     ) -> Result<TaskState, CoreError> {
+        // M12 fault point: kill here = durable park without a resolved waiter.
+        tachyon_tools::fault::reach("approval.park").await;
         let from = self.state.status;
         if from != TaskStatus::WaitingApproval {
             self.transition_journalled(StateEvent::Status {
