@@ -66,7 +66,7 @@ fn wait_endpoint(data: &Path, child: &mut Child) -> serde_json::Value {
 }
 
 /// Connect with bounded retries: Windows named pipes report
-/// ERROR_PIPE_BUSY ("All pipe instances are busy") between the readiness
+/// `ERROR_PIPE_BUSY` ("All pipe instances are busy") between the readiness
 /// probe dropping its client and the accept loop staging the next instance.
 async fn connect_retry(socket: &Path) -> std::io::Result<tachyon_gateway::transport::Stream> {
     let mut last = None;
