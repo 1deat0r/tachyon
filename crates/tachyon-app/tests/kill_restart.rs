@@ -65,6 +65,23 @@ fn wait_endpoint(data: &Path, child: &mut Child) -> serde_json::Value {
     panic!("gateway endpoint never appeared or socket never accepted");
 }
 
+/// Connect with bounded retries: Windows named pipes report
+/// ERROR_PIPE_BUSY ("All pipe instances are busy") between the readiness
+/// probe dropping its client and the accept loop staging the next instance.
+async fn connect_retry(socket: &Path) -> std::io::Result<tachyon_gateway::transport::Stream> {
+    let mut last = None;
+    for _ in 0..40 {
+        match tachyon_gateway::transport::connect(socket).await {
+            Ok(stream) => return Ok(stream),
+            Err(e) => {
+                last = Some(e);
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        }
+    }
+    Err(last.expect("at least one connect attempt"))
+}
+
 /// True when a client can complete a connect (accept loop is live).
 /// Uses the gateway transport so Windows named pipes work too (spec §36).
 fn socket_accepts(path: &Path) -> bool {
@@ -77,11 +94,7 @@ fn socket_accepts(path: &Path) -> bool {
     };
     rt.block_on(async {
         matches!(
-            tokio::time::timeout(
-                Duration::from_millis(100),
-                tachyon_gateway::transport::connect(&target)
-            )
-            .await,
+            tokio::time::timeout(Duration::from_millis(2_000), connect_retry(&target)).await,
             Ok(Ok(_))
         )
     })
@@ -103,9 +116,7 @@ fn send_command(socket: &Path, command: ProtoCommand) -> (u16, serde_json::Value
         .build()
         .unwrap();
     rt.block_on(async move {
-        let mut stream = tachyon_gateway::transport::connect(&socket)
-            .await
-            .expect("connect");
+        let mut stream = connect_retry(&socket).await.expect("connect");
         let request = RequestEnvelope {
             protocol_version: tachyon_protocol::PROTOCOL_VERSION,
             request_id: EventId::generate(),
