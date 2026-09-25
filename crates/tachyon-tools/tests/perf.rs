@@ -109,5 +109,14 @@ async fn comp_process_output_handling_latency() {
         "comp[process_output.payload] n={SAMPLES} p50={payload_p50:?} p95={payload_p95:?} (stdout_bytes={payload_bytes})"
     );
 
+    // Pin the M13 `wait_for_exit` fast-window fix: with a fixed 10 ms
+    // exit poll the empty child costs ~11.9 ms p50 (executed mutation,
+    // expert board F1); the fast window keeps it under 6 ms. Without
+    // this assert a reverted fix stays green behind printlns only.
+    assert!(
+        base_p50 < Duration::from_millis(6),
+        "process runner regression: empty-child p50={base_p50:?} >= 6ms (pre-fix ~11.9ms)"
+    );
+
     let _ = std::fs::remove_dir_all(&root);
 }

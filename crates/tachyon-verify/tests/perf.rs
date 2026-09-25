@@ -131,4 +131,14 @@ async fn comp_verification_plan_and_run_latency() {
     println!(
         "comp[verification.run] n={RUN_SAMPLES} p50={run_p50:?} p95={run_p95:?} (full run incl. child process)"
     );
+
+    // Pin the M13 `wait_finished` fast-window fix: with a fixed 10 ms
+    // completion poll the trivial run costs ~22.5 ms p50 (executed
+    // mutation, expert board F1); the fast window keeps it under 18 ms
+    // (python3's own startup is ~10 ms). Without this assert a reverted
+    // fix stays green behind printlns only.
+    assert!(
+        run_p50 < Duration::from_millis(18),
+        "verification regression: run p50={run_p50:?} >= 18ms (pre-fix ~22.5ms)"
+    );
 }

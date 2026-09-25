@@ -279,14 +279,24 @@ async fn cancellation_drains_the_owned_process_before_returning() {
         context(&ws, &artifacts, granted()),
         cancel.clone(),
     ));
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while !ws.path().join("target/pid").exists() {
+    // Poll until the CONTENT is non-empty, not merely until the file
+    // exists: `Path::write_text` creates the file empty before writing,
+    // so an exists-then-read race yielded pid="" once — `reaped("")`
+    // checks "/proc/", which exists, and the assert failed while the
+    // TERM-file asserts above (which never read pid) passed.
+    let pid = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match std::fs::read_to_string(ws.path().join("target/pid")) {
+                Ok(content) if !content.trim().is_empty() => {
+                    break content.trim().to_owned();
+                }
+                _ => {}
+            }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
     .await
     .unwrap();
-    let pid = std::fs::read_to_string(ws.path().join("target/pid")).unwrap();
     cancel.cancel();
     let report = tokio::time::timeout(Duration::from_secs(2), worker)
         .await

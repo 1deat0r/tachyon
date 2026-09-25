@@ -1,23 +1,23 @@
 # Gates: M13 Performance campaign
 
-OWNS: crates/**/tests/perf.rs, crates/**/src/**, crates/*/Cargo.toml, scripts/m13_report_check.mjs, docs/milestones/M13_REPORT.md, PROGRESS.md, CHANGELOG.md, GATES.md
+OWNS: crates/tachyon-tools/src/process.rs, crates/tachyon-scheduler/src/scheduler.rs, crates/tachyon-verify/tests/runner.rs, crates/tachyon-router/tests/perf.rs, crates/tachyon-scheduler/tests/perf.rs, crates/tachyon-gateway/tests/perf.rs, crates/tachyon-repo/tests/perf.rs, crates/tachyon-store/tests/perf.rs, crates/tachyon-models/tests/perf.rs, crates/tachyon-verify/tests/perf.rs, crates/tachyon-tools/tests/perf.rs, scripts/perf_gate.sh, scripts/m13_report_check.mjs, docs/milestones/M13_REPORT.md, PROGRESS.md, CHANGELOG.md, GATES.md
 
 Scope: Ship issue #9 — release-mode harness measuring all five spec §43 targets plus component baselines for the eight critical-path areas, strace/stage-timer profiling evidence, optimization only where measurement justifies it, M13 report with p50/p95 numbers, PROGRESS and CHANGELOG entries.
 
 - [x] G1: Workspace fmt/check/strict clippy green after M13 changes
   CHECK: cargo fmt --check && cargo check --workspace && cargo clippy --workspace --all-targets -- -D warnings 2>&1
   EXPECT: Finished
-  EVIDENCE: automatic-evidence=v1; definition-sha256=39462ee98e0fdc301cb0fc6c0f40d4018c502b94f4e0bf7356d1532038d80217; exit=0; EXPECT=matched; output-sha256=37396357c522737ec0df93a27ed75238ebd2c2938bf98aba05960144e933d410; output-bytes=1051; shell=/bin/sh; cwd=/run/media/its1deat0r/Projects/AI Agents/Tachyon Agent; path=c356005bf5cc/16 entries
+  EVIDENCE: automatic-evidence=v1; definition-sha256=39462ee98e0fdc301cb0fc6c0f40d4018c502b94f4e0bf7356d1532038d80217; exit=0; EXPECT=matched; output-sha256=b34460f556cc245968bb63aa9fb1c4e9e28830d2f80adde90e2b89d7db572351; output-bytes=1957; shell=/bin/sh; cwd=/run/media/its1deat0r/Projects/AI Agents/Tachyon Agent; path=c356005bf5cc/16 entries
 
 - [x] G2: Default workspace test suite still green (perf tests are ignore-gated, no regressions)
   CHECK: cargo test --workspace 2>&1
   EXPECT: test result: ok
-  EVIDENCE: automatic-evidence=v1; definition-sha256=a95c7026bb8b5b13a0a38c49fb4bfdbc2e5f5caa13b592abaff620ec82b2faf4; exit=0; EXPECT=matched; output-sha256=ff2727e22e93dd154bd316c7d8ef77a470ccc85e2de57e298ccb0c09dd12c38d; output-bytes=51444; shell=/bin/sh; cwd=/run/media/its1deat0r/Projects/AI Agents/Tachyon Agent; path=c356005bf5cc/16 entries
+  EVIDENCE: automatic-evidence=v1; definition-sha256=a95c7026bb8b5b13a0a38c49fb4bfdbc2e5f5caa13b592abaff620ec82b2faf4; exit=0; EXPECT=matched; output-sha256=ba8cc5bf795cd69da22dd3c35a8becbf6a90267e69f20dbf15bdce4a6d956dc7; output-bytes=52351; shell=/bin/sh; cwd=/run/media/its1deat0r/Projects/AI Agents/Tachyon Agent; path=c356005bf5cc/16 entries
 
-- [x] G3: All five §43 targets measured and PASS in release mode (T1 router <2ms p95, T2 scheduler dispatch <1ms p95, T3 gateway command <5ms p95, T4 first visible task event <50ms p95, T5 warm symbol/reference <250ms p50 / <500ms p95); component baseline tests print p50/p95 for persistence, ipc frame, model wait, verification, process output, cold index build
-  CHECK: cargo test --release -p tachyon-router -p tachyon-scheduler -p tachyon-gateway -p tachyon-repo -p tachyon-store -p tachyon-models -p tachyon-verify -p tachyon-tools --test perf -- --ignored --nocapture 2>&1
-  EXPECT: test result: ok
-  EVIDENCE: automatic-evidence=v1; definition-sha256=1cb8884f577fe90084a56dfc78538872631a8a0e85531ad7e8d07ece2236e83b; exit=0; EXPECT=matched; output-sha256=c0576ea94e9bfb82b5fe5dfe1ad9eef479317bb921df50fc5143ebd4836c86b7; output-bytes=3417; shell=/bin/sh; cwd=/run/media/its1deat0r/Projects/AI Agents/Tachyon Agent; path=c356005bf5cc/16 entries
+- [x] G3: All five §43 targets measured and PASS in release mode (T1 router <2ms p95, T2 scheduler dispatch <1ms p95, T3 gateway command <5ms p95, T4 first visible task event <50ms p95, T5 warm symbol/reference <250ms p50 / <500ms p95); component baseline tests print p50/p95 for persistence, ipc frame, model wait, verification, process output, cold index build; runner requires all five PASS markers so a zero-test run cannot pass
+  CHECK: sh scripts/perf_gate.sh
+  EXPECT: perf gate ok
+  EVIDENCE: automatic-evidence=v1; definition-sha256=6f72c8ca47bbb1c740203157f6788af1eed9b52665163be93aed27fc2c4373cd; exit=0; EXPECT=matched; output-sha256=e3d7eb9b95afcfd6f27a3cfa81300980f33fe64b48f7b917666a393ce9e13620; output-bytes=3428; shell=/bin/sh; cwd=/run/media/its1deat0r/Projects/AI Agents/Tachyon Agent; path=c356005bf5cc/16 entries
 
 - [x] G4: M13_REPORT.md exists with method, per-target numbers, eight-area component table, profiling findings, optimization-or-explicit-none, limitations
   CHECK: node scripts/m13_report_check.mjs

@@ -24,9 +24,17 @@ Milestone 14 — next (Milestone 13 complete, see gates below)
   p50, 1.7×); no other rewrites because no other area missed a target.
   Indexing re-reads the corpus per query (14.4ms warm = 6.0ms lookup +
   8.5ms search over 441 files) — documented as an M14 watch item with
-  projection. One unreproduced `cancellation_drains` reaped-assert
-  failure recorded as a watch item (25 targeted + 3 full-suite reruns
-  green; final 487 passed / 0 failed). Report:
+  projection. One-off `cancellation_drains` reaped-assert failure
+  root-caused by the expert board's executed disproof (test-side pid
+  file empty-read TOCTOU, mechanism predates the PR; production ruled
+  out via the drain-before-reap invariant chain; test fixed). Review:
+  5-seat expert board (standards, spec, adversarial, concurrency,
+  test-honesty) + disproof round — 0 confirmed blockers; majors all
+  test/docs-layer and fixed in-round: optimization-pinning asserts
+  (mutation-tested red), `scripts/perf_gate.sh` requires all five
+  `perf[T*] PASS` markers (zero-run masking closed), GATES OWNS
+  narrowed, scheduler poll delays named, report discloses
+  single-repository + T4-ambiguity + T5-layer. Report:
   `docs/milestones/M13_REPORT.md`.
 
 - 2026-09-24 Milestone 12 — Recovery hardening: env-gated fault points

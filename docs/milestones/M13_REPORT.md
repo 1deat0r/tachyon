@@ -33,10 +33,19 @@ without a measurement, and no other area missed a target.
     gap is outcome handling + readiness + grant + spawn + wakeup.
   - T3: framed `Ping` write to decoded response on one live gateway socket.
   - T4: `SendMessage` request write to the `Journal` event frame read off a
-    second, subscribed socket (operator-visible first task event).
+    second, subscribed socket (operator-visible first task event). Spec
+    ambiguity, disclosed: §43 fixes neither t0 nor observer — task
+    creation and `Subscribe` sit outside the timer because visibility
+    presupposes an existing subscriber (creation→first-replayed-event
+    via `after_seq` would be a defensible alternative t0; noted as an
+    M14 matrix candidate).
   - T5: warm `definition_use(symbol)` + `lexical_search(symbol)` over an
     already-built index of this workspace (441 files, `target/`/`.git`
-    pruned); index built and warmed before sampling.
+    pruned); index built and warmed before sampling. This is the
+    **repository-layer leg** of §43's "request": routing adds the
+    T1-measured cost and gateway transport the T3-measured cost on top;
+    no single test composes the full route→repo→gateway path end to
+    end (that composition belongs to M14's benchmark matrix).
 - Numbers below are transcribed from the final harness transcript
   (G3-equivalent run on the final tree; 8/8 suites `test result: ok`,
   0 failed). Ledger gate G7 reconciles this report against the final G3
@@ -83,7 +92,10 @@ All eight critical-path areas from docs/04 M13, final-run figures
 
 Component tests carry no §43 number; they are report-only baselines that
 fail the gate only if the measurement itself breaks (zero samples, failed
-command, missing symbols).
+command, missing symbols) — except two, which now carry regression
+asserts (see Optimizations: empty-child p50 < 6 ms, verification-run
+p50 < 18 ms, added by the expert-board fix round so a reverted fix turns
+the suite red instead of only moving printed numbers).
 
 ## Profiling
 
@@ -148,6 +160,21 @@ on the final run). Everything else measured inside its §43 budget with
 headroom, so **no other code was changed** — per docs/04 M13's rule, an
 unmeasured rewrite would be out of scope.
 
+**Expert-board fix round (post-review hardening):** a 5-seat review
+board with an executed disproof round confirmed that neither fix was
+pinned by any assertion (reverting both sleeps kept the whole suite
+green while the printed numbers moved). Applied: regression asserts
+`comp[process_output.baseline] p50 < 6 ms` and
+`comp[verification.run] p50 < 18 ms` (thresholds cleanly separate the
+pre-fix ~11.9 ms / ~22.5 ms from the post-fix ~2 ms / ~13 ms);
+`scripts/perf_gate.sh` replaces G3's raw command so all five
+`perf[T*] PASS` markers are required (a zero-test run or dropped
+package can no longer satisfy the gate); scheduler poll delays named
+(`FINISH_POLL_FAST_MS`/`FINISH_POLL_SLOW_MS`) to match `process.rs`;
+GATES `OWNS` narrowed to the files actually touched. Mutation re-run
+afterwards: reverted fixes turn the perf gate red (evidence in the
+board record).
+
 ## Findings and recommendations
 
 - **Indexing re-reads the corpus per query** (largest remaining measured
@@ -182,25 +209,32 @@ unmeasured rewrite would be out of scope.
    0.016 s. Not reproducible warm. The harness now prints first and repeat
    scans separately, and T5 warms before sampling, so the §43 number never
    depends on this.
-2. **One unreproduced test failure:** the first full-workspace run after
-   the two optimizations failed `cancellation_drains_the_owned_process_
-   before_returning` (verify runner:301, `immediate child not reaped`);
-   the graceful-TERM assertion before it passed. Not reproduced in 25
-   targeted reruns, 5 package reruns, or the 3 subsequent full-workspace
-   runs (final: 487 passed / 0 failed). Structural review: `SchedulerOwner::
-   close` drains the worker `JoinSet` before `run()` returns, and the
-   drain awaits `kill_and_reap`'s `child.wait()`, so a zombie at assert
-   time should be impossible on the success path — consistent with a
-   transient (e.g. delayed reaping visible across the check window)
-   rather than a logic change. Flagged as a watch item for M14; if it
-   recurs, instrument the drain join before touching the process-ownership
-   code.
+2. **One-off test failure — root-caused and fixed (was a watch item):**
+   the first full-workspace run after the two optimizations failed
+   `cancellation_drains_the_owned_process_before_returning` (verify
+   runner:301, `immediate child not reaped`) once; the graceful-TERM
+   assertion before it passed, and it never reproduced (25 targeted, 5
+   package, 3 full-suite reruns). The expert board's disproof round
+   **executed** the root cause: a test-side TOCTOU — Python
+   `Path.write_text` creates `target/pid` empty before writing, the test
+   polled `exists()` then read once, an empty read gave `pid=""`, and
+   `reaped("")` checks `/proc/`, which exists → assert false (12/1000
+   empty reads in the repro; strace shows `open(O_CREAT|O_TRUNC)` then
+   `write`). Production was independently ruled out by two seats via the
+   drain-before-reap invariant chain (`close()` → `join_next` →
+   `run_cancellable` → `child.wait()`; tokio reaps synchronously in
+   wait). Fix: the test now polls for non-empty content before reading
+   (`crates/tachyon-verify/tests/runner.rs`), which also removes the
+   `reaped("")` hazard. The mechanism predates this PR.
 
 ## Limitations
 
-- Single machine, single run series; spec §43 says "representative
-  hardware" — these are one local dev machine's numbers, internal gates
-  only, not public claims.
+- Single machine, single run series **and a single repository** (this
+  workspace, 441 files); spec §43 says "representative repositories and
+  hardware" (plural). One repo is enough to catch pathologies (and did)
+  but not to generalize: M14's fixture-breadth work (checklist item #6)
+  owns the multi-repository matrix. Internal gates only, not public
+  claims.
 - Model-wait numbers use `FakeModelProvider` (no network, no provider);
   no token/cost figures here. M14's matrix owns real-provider numbers
   under same-model discipline (AD-015).

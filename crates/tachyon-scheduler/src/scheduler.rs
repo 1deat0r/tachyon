@@ -182,6 +182,8 @@ impl SchedulerHandle {
         timeout: Duration,
     ) -> Result<TaskRunSnapshot, SchedulerError> {
         const FAST_FINISH_POLLS: u32 = 50;
+        const FINISH_POLL_FAST_MS: u64 = 1;
+        const FINISH_POLL_SLOW_MS: u64 = 10;
         let deadline = Instant::now() + timeout;
         let mut polls: u32 = 0;
         loop {
@@ -189,7 +191,11 @@ impl SchedulerHandle {
             if snapshot.finished || Instant::now() >= deadline {
                 return Ok(snapshot);
             }
-            let delay_ms = if polls < FAST_FINISH_POLLS { 1 } else { 10 };
+            let delay_ms = if polls < FAST_FINISH_POLLS {
+                FINISH_POLL_FAST_MS
+            } else {
+                FINISH_POLL_SLOW_MS
+            };
             polls = polls.saturating_add(1);
             tokio::time::sleep(Duration::from_millis(delay_ms)).await;
         }
