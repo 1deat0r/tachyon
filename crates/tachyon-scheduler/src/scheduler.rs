@@ -170,18 +170,28 @@ impl SchedulerHandle {
     }
 
     /// Waits until a run finishes or `timeout` elapses.
+    ///
+    /// M13: completion was noticed on a fixed 10 ms tick, which added up
+    /// to 10 ms of pure poll latency to every short run (each verification
+    /// pays this after the child is already done). Fast checks for the
+    /// first `FAST_FINISH_POLLS`, then the original 10 ms cadence — the
+    /// steady-state wakeup rate for long runs is unchanged.
     pub async fn wait_finished(
         &self,
         task_id: TaskId,
         timeout: Duration,
     ) -> Result<TaskRunSnapshot, SchedulerError> {
+        const FAST_FINISH_POLLS: u32 = 50;
         let deadline = Instant::now() + timeout;
+        let mut polls: u32 = 0;
         loop {
             let snapshot = self.status(task_id).await?;
             if snapshot.finished || Instant::now() >= deadline {
                 return Ok(snapshot);
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            let delay_ms = if polls < FAST_FINISH_POLLS { 1 } else { 10 };
+            polls = polls.saturating_add(1);
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
         }
     }
 

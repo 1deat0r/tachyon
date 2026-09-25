@@ -392,11 +392,36 @@ struct OwnedChild {
 
 #[cfg(unix)]
 impl OwnedChild {
+    /// Fast-poll window (M13): detection granularity for children that
+    /// live less than this window's budget. The old fixed 10 ms sleep
+    /// dominated every short child's measured runtime; short-lived
+    /// children (sh, python3, git) now exit within ~1 ms of detection.
+    const FAST_EXIT_POLLS: u32 = 50;
+    /// Poll delay while the child is inside the fast window.
+    const EXIT_POLL_FAST: Duration = Duration::from_millis(1);
+    /// Poll delay after the fast window: bounded wakeups for long-lived
+    /// children (verify commands, test runners).
+    const EXIT_POLL_SLOW: Duration = Duration::from_millis(10);
+
     async fn wait_for_exit(&self, pid: u32) -> std::io::Result<()> {
-        while !leader_exited(pid)? {
-            tokio::time::sleep(Duration::from_millis(10)).await;
+        // Exit detection is poll-based by design: `leader_exited` uses
+        // WNOWAIT so the leader stays unreaped and its PGID stays
+        // reserved until `kill_and_reap` signals the group (PID-reuse
+        // guard). Only the sleep granularity is variable — fast at first,
+        // then backed off.
+        let mut polls: u32 = 0;
+        loop {
+            if leader_exited(pid)? {
+                return Ok(());
+            }
+            let delay = if polls < Self::FAST_EXIT_POLLS {
+                Self::EXIT_POLL_FAST
+            } else {
+                Self::EXIT_POLL_SLOW
+            };
+            polls = polls.saturating_add(1);
+            tokio::time::sleep(delay).await;
         }
-        Ok(())
     }
 
     async fn terminate(&mut self) -> std::io::Result<()> {
