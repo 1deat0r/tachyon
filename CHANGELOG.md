@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Milestone 13: performance campaign — release-mode harness for all
+  five spec §43 targets (router path, scheduler dispatch, gateway
+  command, first visible task event, warm symbol/reference) plus
+  component baselines for the eight critical-path areas; all five
+  targets pass with headroom. Fixed two measured 10 ms poll latencies
+  on the process/verification critical path (`wait_for_exit` fast
+  window: empty child 11.88 ms → 1.91–2.85 ms p50; `wait_finished`
+  fast window: verification run 22.47 ms → 13.04 ms p50). Numbers,
+  strace attribution and findings in `M13_REPORT.md`.
 - Milestone 12: recovery hardening (env-gated fault points, effect
   fixture with §19 reconcile, driver re-entry / fresh-id re-ask,
   gateway SIGKILL restart test, six-domain seam gates) with the §42

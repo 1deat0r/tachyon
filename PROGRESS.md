@@ -4,9 +4,38 @@ This file is updated by the implementing agent after every milestone.
 
 ## Current milestone
 
-Milestone 13 — next (Milestone 12 complete, see gates below)
+Milestone 14 — next (Milestone 13 complete, see gates below)
 
 ## Completed gates
+
+- 2026-09-25 Milestone 13 — Performance campaign: release-mode,
+  ignore-gated harness (`tests/perf.rs` in eight crates) measuring all
+  five spec §43 targets plus component baselines for every docs/04
+  critical-path area. All five targets PASS on the first measured
+  baseline: T1 router p95 1.65µs (<2ms), T2 scheduler dispatch p95
+  34.8µs (<1ms), T3 gateway command p95 16.2µs (<5ms), T4 first visible
+  task event p95 201.6µs (<50ms), T5 warm symbol/reference p50 14.4ms
+  / p95 15.2ms (<250/<500ms). strace attribution: hot paths are tokio
+  futex/epoll parking + ~1 fsync per WAL commit (≈80µs), no syscall
+  pathology. Two measured 10ms poll latencies fixed on the named
+  critical paths — process-runner `wait_for_exit` fast window (empty
+  child 11.88ms → 1.91–2.85ms p50, ≈4–6×) and scheduler
+  `wait_finished` fast window (verification run 22.47ms → 13.04ms
+  p50, 1.7×); no other rewrites because no other area missed a target.
+  Indexing re-reads the corpus per query (14.4ms warm = 6.0ms lookup +
+  8.5ms search over 441 files) — documented as an M14 watch item with
+  projection. One-off `cancellation_drains` reaped-assert failure
+  root-caused by the expert board's executed disproof (test-side pid
+  file empty-read TOCTOU, mechanism predates the PR; production ruled
+  out via the drain-before-reap invariant chain; test fixed). Review:
+  5-seat expert board (standards, spec, adversarial, concurrency,
+  test-honesty) + disproof round — 0 confirmed blockers; majors all
+  test/docs-layer and fixed in-round: optimization-pinning asserts
+  (mutation-tested red), `scripts/perf_gate.sh` requires all five
+  `perf[T*] PASS` markers (zero-run masking closed), GATES OWNS
+  narrowed, scheduler poll delays named, report discloses
+  single-repository + T4-ambiguity + T5-layer. Report:
+  `docs/milestones/M13_REPORT.md`.
 
 - 2026-09-24 Milestone 12 — Recovery hardening: env-gated fault points
   (`TACHYON_FAULT_POINT`, ADR 0001) at evidence/model/mutation/verify/
