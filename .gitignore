@@ -15,8 +15,8 @@
 # Skill installer artifacts (live in ~/.config/opencode/skills, not this repo)
 .agents/
 .agent/
-.claude/
-skills-lock.json
+.claude/*
+!.claude/settings.json
 
 # Skill installer alternate path
 agent/
