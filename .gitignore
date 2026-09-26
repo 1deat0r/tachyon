@@ -20,3 +20,6 @@ skills-lock.json
 
 # Skill installer alternate path
 agent/
+
+# M14: fixture-local cargo scratch dirs (never ship build artifacts)
+fixtures/*/target/
