@@ -7,6 +7,7 @@
 
 use crate::inventory::{Inventory, is_probably_text};
 use crate::language::{LanguageBackend, Symbol};
+use crate::projection::TextProjection;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -50,6 +51,7 @@ pub struct SymbolIndex {
     root: std::path::PathBuf,
     backend: Box<dyn LanguageBackend>,
     files: HashMap<String, IndexedFile>,
+    projection: TextProjection,
     /// Index generation: bumped by every build/refresh.
     pub generation: u64,
 }
@@ -61,14 +63,25 @@ impl SymbolIndex {
             root: root.to_path_buf(),
             backend: Box::new(backend),
             files: HashMap::new(),
+            projection: TextProjection::new(),
             generation: 0,
         }
     }
 
+    /// The text projection fed at index time: pass it to
+    /// [`crate::search::search`] so warm queries serve corpus text from
+    /// memory instead of re-reading files.
+    #[must_use]
+    pub fn projection(&self) -> &TextProjection {
+        &self.projection
+    }
+
     /// (Re)builds the index over `inventory`, extracting symbols from text
-    /// files with a known language.
+    /// files with a known language. Clears the text projection first so no
+    /// prior-corpus text survives into the new generation.
     pub fn build(&mut self, inventory: &Inventory) {
         self.files.clear();
+        self.projection.clear();
         for record in &inventory.files {
             self.index_record(record);
         }
@@ -76,14 +89,14 @@ impl SymbolIndex {
     }
 
     /// Re-indexes `rels` (watcher invalidation path). Unknown rels are
-    /// dropped from the index.
+    /// dropped from the index and from the projection together.
     pub fn refresh(&mut self, inventory: &Inventory, rels: &[&str]) {
         for rel in rels {
-            match inventory.get(rel) {
-                Some(record) => self.index_record(record),
-                None => {
-                    self.files.remove(*rel);
-                }
+            if let Some(record) = inventory.get(rel) {
+                self.index_record(record);
+            } else {
+                self.files.remove(*rel);
+                self.projection.remove(rel);
             }
         }
         self.generation += 1;
@@ -100,6 +113,7 @@ impl SymbolIndex {
         let Ok(text) = std::fs::read_to_string(&path) else {
             return;
         };
+        self.projection.put(&record.rel, &record.hash, text.clone());
         let symbols = self.backend.extract(record.language, &text);
         let lines: Vec<&str> = text.lines().collect();
         let with_excerpts = symbols
@@ -151,6 +165,9 @@ impl SymbolIndex {
 
     /// Word-boundary references to `name` across indexed files, excluding
     /// the definition lines themselves. Deterministic file/line order.
+    /// File text comes from the indexed generation via the projection, so
+    /// it stays consistent with the symbols filtered above; callers repair
+    /// staleness against disk through [`Self::verify`] and [`Self::refresh`].
     #[must_use]
     pub fn references(&self, name: &str) -> Vec<Location> {
         let definition_lines: std::collections::HashSet<(&str, u32)> = self
@@ -168,8 +185,10 @@ impl SymbolIndex {
         let mut rels: Vec<&String> = self.files.keys().collect();
         rels.sort();
         for rel in rels {
-            let path = self.root.join(rel);
-            let Ok(text) = std::fs::read_to_string(&path) else {
+            let Some(indexed) = self.files.get(rel.as_str()) else {
+                continue;
+            };
+            let Some(text) = self.projection.get_or_read(&self.root, rel, &indexed.hash) else {
                 continue;
             };
             for (index, line) in text.lines().enumerate() {
@@ -205,8 +224,9 @@ impl SymbolIndex {
     }
 
     /// Re-hashes every indexed file: returns rels whose content drifted
-    /// from the indexed hash (stale index entries), and drops deleted files.
-    /// Hashes are authoritative; the index is repaired by `refresh`.
+    /// from the indexed hash (stale index entries), and drops deleted files
+    /// from the index and the projection together. Hashes are authoritative;
+    /// the index is repaired by `refresh`.
     pub fn verify(&mut self, inventory: &Inventory) -> Vec<String> {
         let mut stale = Vec::new();
         let indexed: Vec<String> = self.files.keys().cloned().collect();
@@ -214,11 +234,14 @@ impl SymbolIndex {
             match inventory.get(&rel) {
                 None => {
                     self.files.remove(&rel);
+                    self.projection.remove(&rel);
                     stale.push(rel);
                 }
                 Some(record) => {
                     let hash = &self.files.get(&rel).map(|file| file.hash.clone());
                     if hash.as_ref() != Some(&record.hash) {
+                        self.files.remove(&rel);
+                        self.projection.remove(&rel);
                         stale.push(rel);
                     }
                 }
@@ -228,10 +251,23 @@ impl SymbolIndex {
         stale
     }
 
-    /// Reads a file relative to the index root.
+    /// Reads a file relative to the index root, straight from disk.
+    /// Unlike [`SymbolIndex::read_projected`]/[`SymbolIndex::references`]
+    /// this is intentionally live: use it for explicit evidence reads,
+    /// never as a query path.
     #[must_use]
     pub fn read_rel(&self, rel: &str) -> Option<String> {
         std::fs::read_to_string(self.root.join(rel)).ok()
+    }
+
+    /// Reads a file from the indexed generation via the projection
+    /// (memory when the indexed hash still matches, one counted disk
+    /// read otherwise). Query and evidence paths that must see the same
+    /// generation as the symbols use this instead of [`SymbolIndex::read_rel`].
+    #[must_use]
+    pub fn read_projected(&self, rel: &str) -> Option<std::sync::Arc<str>> {
+        let indexed = self.files.get(rel)?;
+        self.projection.get_or_read(&self.root, rel, &indexed.hash)
     }
 
     /// True when `path` is inside the index root (for watch filtering).

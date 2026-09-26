@@ -96,7 +96,7 @@ fn t5_warm_symbol_reference_p50_under_250ms() {
     for i in 0..WARMUP {
         let symbol = SYMBOLS[i % SYMBOLS.len()];
         let _ = index.definition_use(symbol);
-        let _ = lexical_search(&root, &inventory, symbol, &options);
+        let _ = lexical_search(&root, &inventory, index.projection(), symbol, &options);
     }
 
     let mut samples = Vec::with_capacity(SAMPLES);
@@ -107,7 +107,7 @@ fn t5_warm_symbol_reference_p50_under_250ms() {
         let start = Instant::now();
         let found = index.definition_use(symbol);
         let after_lookup = Instant::now();
-        let hits = lexical_search(&root, &inventory, symbol, &options);
+        let hits = lexical_search(&root, &inventory, index.projection(), symbol, &options);
         let end = Instant::now();
         lookup_samples.push(after_lookup.duration_since(start));
         search_samples.push(end.duration_since(after_lookup));

@@ -3,7 +3,9 @@
 
 use std::path::PathBuf;
 use tachyon_repo::language::HeuristicBackend;
-use tachyon_repo::{Inventory, SearchOptions, SymbolIndex, Watcher, lexical_search};
+use tachyon_repo::{
+    Inventory, SearchOptions, SymbolIndex, TextProjection, Watcher, lexical_search,
+};
 
 fn fixture(name: &str) -> PathBuf {
     let root = std::env::temp_dir().join(format!("tachyon-m4-{name}-{}", std::process::id()));
@@ -129,13 +131,15 @@ fn python_symbols_extracted() {
 fn lexical_search_structured() {
     let root = fixture("search");
     let inventory = Inventory::scan(&root, 10_000).unwrap();
+    let projection = TextProjection::new();
     let options = SearchOptions::default();
-    let hits = lexical_search(&root, &inventory, "refreshToken", &options);
+    let hits = lexical_search(&root, &inventory, &projection, "refreshToken", &options);
     assert!(hits.len() >= 4, "{hits:?}");
     assert!(hits.iter().all(|hit| hit.column >= 1));
     let ts_only = lexical_search(
         &root,
         &inventory,
+        &projection,
         "refreshToken",
         &SearchOptions {
             extensions: vec!["ts".to_owned()],

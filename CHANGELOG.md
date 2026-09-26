@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Milestone 14: MVP freeze — full spec §44 benchmark matrix (3 fixtures ×
+  5 modes × n=10 = 150 driver runs plus Class A/B composed legs) through
+  the descriptor-driven `bench_matrix` example; 150/150 verified success
+  at equal full/reference rates, median TTFR full p50 32/108/115 ms;
+  explicit §42 security + recovery suite gate with a structural no-TCP
+  exposure check; new Class D (`multi-file-migration`) and Class E
+  (`architecture-plan`) fixtures with broken-first self-check gates;
+  content-addressed text projection closes the M13 corpus-re-read watch
+  item (warm queries read 0 bytes; T5 14.43 → 10.11 ms p50). §45
+  dispositions 10 MET / 1 PARTIAL; kill criteria, docs/11 decisions
+  (#2 TUI-first, #11 pinned scripted provider) and deferred work recorded
+  in `MVP_REPORT.md`; aggregate artifact `docs/milestones/M14_MATRIX.json`.
 - Milestone 13: performance campaign — release-mode harness for all
   five spec §43 targets (router path, scheduler dispatch, gateway
   command, first visible task event, warm symbol/reference) plus

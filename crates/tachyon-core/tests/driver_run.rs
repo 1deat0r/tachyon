@@ -1,5 +1,6 @@
-//! M11 item 6 (core part): ONE shared run driver. The `auth_refresh`
-//! example and every future host (gateway `tachyon run`) execute the
+//! M11 item 6 (core part): ONE shared run driver. The `bench_matrix`
+//! example (M14, formerly `auth_refresh`) and every future host (gateway
+//! `tachyon run`) execute the
 //! evidence -> model -> patch -> verification sequence through
 //! `tachyon_core::driver::drive`, which runs the worker half of the M10
 //! plan §2 proposal/ack path: `start_run` first, then revision-bound

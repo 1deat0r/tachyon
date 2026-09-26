@@ -27,7 +27,7 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
-# G5 e2e arms a scripted provider exactly like the auth_refresh example
+# G5 e2e arms a scripted provider exactly like the bench_matrix example
 # (base_hash over the scratch fixture) and the in-flight StartRun test
 # drives a deliberately blocking provider through the ModelProvider trait.
 async-trait = { workspace = true }

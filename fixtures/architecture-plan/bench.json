@@ -1,0 +1,47 @@
+{
+  "id": "architecture-plan",
+  "class": "E",
+  "objective": "Extract the HTML rendering logic from renderer lib.rs into the render module without changing the public API or rendering output.",
+  "evidence_paths": [
+    "renderer/src/lib.rs",
+    "renderer/src/render.rs",
+    "renderer/tests/architecture.rs",
+    "renderer/tests/render_test.rs"
+  ],
+  "protected_paths": [
+    "Cargo.toml",
+    "Cargo.lock",
+    "renderer/Cargo.toml",
+    "renderer/tests/architecture.rs",
+    "renderer/tests/render_test.rs",
+    "catalog/Cargo.toml",
+    "catalog/src/lib.rs"
+  ],
+  "change_paths": ["renderer/src/lib.rs", "renderer/src/render.rs"],
+  "contract": {
+    "clauses": [
+      {
+        "kind": "CommandPasses",
+        "command": {
+          "program": "cargo",
+          "args": ["test", "--offline", "--locked"],
+          "cwd": ".",
+          "env": {},
+          "timeout_ms": 180000
+        }
+      },
+      {
+        "kind": "ChangedPathsWithin",
+        "paths": ["renderer/src/lib.rs", "renderer/src/render.rs"]
+      },
+      { "kind": "FileUnchanged", "path": "Cargo.toml" },
+      { "kind": "FileUnchanged", "path": "Cargo.lock" },
+      { "kind": "FileUnchanged", "path": "renderer/tests/architecture.rs" },
+      { "kind": "FileUnchanged", "path": "renderer/tests/render_test.rs" },
+      { "kind": "FileUnchanged", "path": "catalog/src/lib.rs" }
+    ]
+  },
+  "requested_checks": ["renderer"],
+  "available_checks": ["renderer", "catalog"],
+  "check_note": "Affected risk runs renderer; catalog only under Full risk"
+}

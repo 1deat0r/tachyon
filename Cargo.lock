@@ -2410,6 +2410,7 @@ dependencies = [
 name = "tachyon-core"
 version = "0.0.1"
 dependencies = [
+ "async-trait",
  "serde",
  "serde_json",
  "tachyon-ir",
@@ -2556,9 +2557,13 @@ dependencies = [
  "serde",
  "serde_json",
  "tachyon-ir",
+ "tachyon-models",
+ "tachyon-repo",
+ "tachyon-retrieval",
  "tachyon-telemetry",
  "tachyon-types",
  "thiserror 2.0.20",
+ "tokio",
 ]
 
 [[package]]

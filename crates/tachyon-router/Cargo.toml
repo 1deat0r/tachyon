@@ -13,5 +13,11 @@ tachyon-telemetry = { version = "0.0.1", path = "../tachyon-telemetry" }
 tachyon-types = { workspace = true }
 thiserror = { workspace = true }
 
+[dev-dependencies]
+tachyon-models = { version = "0.0.1", path = "../tachyon-models" }
+tachyon-repo = { version = "0.0.1", path = "../tachyon-repo" }
+tachyon-retrieval = { version = "0.0.1", path = "../tachyon-retrieval" }
+tokio = { workspace = true }
+
 [lints]
 workspace = true
