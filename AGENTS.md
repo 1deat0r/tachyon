@@ -80,7 +80,7 @@ Implement these only after the MVP exit gate or an approved ADR.
 
 ## Agent skills
 
-Skeleton: v1 — 2026-09-24
+Skeleton: v2 — 2026-09-26
 
 ### Issue tracker
 

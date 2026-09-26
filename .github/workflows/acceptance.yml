@@ -1,0 +1,36 @@
+name: acceptance
+
+# M14 acceptance, off the PR path: ci.yml already gates every push with
+# fmt/check/test/clippy on three OSes. This workflow runs the gates whose
+# cost or scope makes them nightly material — the named security and
+# recovery suites (with the structural remote-exposure checks and their
+# positive controls), the fixture self-check, and the full spec §44
+# matrix in release mode, validated by the matrix contract checker.
+# Dispatch manually after a milestone; scheduled nightly otherwise.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  acceptance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - name: Security and recovery suites (structural exposure checks)
+        run: scripts/m14_suites.sh
+      - name: Fixture gate
+        run: scripts/m14_fixture_gate.sh
+      - name: Spec 44 matrix (release)
+        run: scripts/m14_matrix.sh
+        env:
+          M14_SAMPLES: "10"
+      - name: Matrix contract check
+        run: node scripts/m14_matrix_check.mjs
