@@ -1,9 +1,10 @@
 //! In-memory text projection over a workspace corpus.
 //!
 //! Index-time writes ([`TextProjection::put`]) cache file text under its
-//! BLAKE3 hash; queries ([`TextProjection::text`]) serve from memory when
-//! the stored hash matches and count the bytes read on a miss, so warm
-//! queries are measurable as reading zero corpus bytes.
+//! BLAKE3 hash; queries ([`TextProjection::get_or_read`],
+//! [`TextProjection::get_cached`]) serve from memory when the stored hash
+//! matches and count the bytes read on a miss, so warm queries are
+//! measurable as reading zero corpus bytes.
 
 use std::collections::HashMap;
 use std::path::Path;

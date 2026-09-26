@@ -66,7 +66,7 @@ Controls, p50 (completion / TTFR):
 |---|---|---|---|---|
 | auth-refresh | 296 / 1 | 155 / 0 | completion within noise, TTFR equal | slower completion, **equal TTFR at 1 ms granularity** |
 | multi-file-migration | 308 / 1 | 144 / 0 | faster completion, TTFR equal | slower completion, TTFR equal |
-| architecture-plan | 337 / 2 | 148 / 0 | completion within noise, TTFR equal | slower completion, TTFR equal |
+| architecture-plan | 337 / 1 | 148 / 0 | completion within noise, TTFR equal | slower completion, TTFR equal |
 
 - The alias modes track `full` within noise (all alias cells coincide with
   `full` by construction, and every alias sample carries `coincides_with: full`)
@@ -77,7 +77,8 @@ Controls, p50 (completion / TTFR):
   overhead shows up in raw wall time. Every mode verifies 150/150 at equal verified
   success, but on wall-clock completion the serial control is fastest on all three
   fixtures — **PARTIAL**, not a general speed claim (see Known limitations; §45 row 11).
-  TTFR at 1 ms granularity cannot separate the modes on these tiny fixtures (see below).
+  TTFR at 1 ms granularity cannot separate the modes on these tiny fixtures (see below):
+  every full-vs-reference TTFR cell reads 1 ms vs 0 ms — a single clock tick, not a win.
 - Completion tails (e.g. architecture-plan p95 431 ms) are real measured maxima at n=10,
   not sustained latencies.
 

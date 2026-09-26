@@ -103,7 +103,16 @@ fn query_paths_perform_no_direct_io() {
         let (_, body) = text.split_once(function).expect("query fn present");
         let end = body.find("\n    pub fn ").unwrap_or(body.len());
         let until_next = &body[..end];
-        for token in ["std::fs", "fs::", "File::"] {
+        // Query fns route I/O through the projection or the shared
+        // text probe; direct reads (including async fs) fail this test.
+        for token in [
+            "std::fs",
+            "fs::",
+            "File::",
+            "read_to_string",
+            "tokio::fs",
+            "OpenOptions",
+        ] {
             assert!(
                 !until_next.contains(token),
                 "{file}::{function} performs direct I/O ({token}) outside the projection"

@@ -522,6 +522,7 @@ async fn run_sample(
     let drive_result = drive(host, context, provider.clone(), plan).await;
     // Always close the store, including on drive failure, before
     // propagating the error: a leaked open writer is a lifecycle break.
+    // (`close` only shuts the pool down; errors are logged, not fatal.)
     if let Some(store) = store_holder {
         store.close().await;
     }
