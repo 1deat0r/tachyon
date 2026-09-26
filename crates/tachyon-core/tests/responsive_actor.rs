@@ -347,7 +347,7 @@ async fn cancel_acknowledges_after_real_reap_while_the_mailbox_serves() {
     // state instead of comparing two observation times.
     assert!(
         durable_status(&f.store, f.task.task_id(), "Cancelled").await,
-        "cancel intent was not durable before the drain"
+        "the durable Cancelled intent never appeared"
     );
     // Reads stay serviceable while that acknowledgement waits for real cleanup.
     let observed = tokio::time::timeout(Duration::from_secs(2), f.task.get_state())
@@ -359,11 +359,12 @@ async fn cancel_acknowledges_after_real_reap_while_the_mailbox_serves() {
         .await
         .expect("the cancel acknowledgement never arrived")
         .unwrap();
-    // The acknowledgement is queued only after every owned effect worker has
-    // drained, so at the instant it arrives the real child must already be
-    // gone. This reads current state (socket EOF / process handle), never the
-    // gap between two observations, so scheduler delay cannot fail it — yet a
-    // child that is still live here proves the acknowledgement outran the reap.
+    // The acknowledgement is answered only after every owned effect worker
+    // has drained, so at the instant it is observed the real child must
+    // already be gone. This reads current state (socket EOF / process
+    // handle), never the gap between two observations, so scheduler delay
+    // cannot fail it — yet a child that is still live here proves the
+    // acknowledgement outran the reap.
     #[cfg(unix)]
     assert!(
         !still_pending(eof.as_mut()).await,
