@@ -13,12 +13,14 @@
 pub mod index;
 pub mod inventory;
 pub mod language;
+pub mod projection;
 pub mod search;
 pub mod watch;
 
 pub use index::{DefinitionUse, Location, SymbolIndex};
 pub use inventory::{FileRecord, Inventory, Language};
 pub use language::{LanguageBackend, Symbol, SymbolKind};
+pub use projection::TextProjection;
 pub use search::{SearchHit, SearchOptions, search as lexical_search};
 pub use watch::Watcher;
 

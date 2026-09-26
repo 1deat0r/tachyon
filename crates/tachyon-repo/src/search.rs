@@ -4,6 +4,7 @@
 //! a later milestone; unsupported languages fall back to exactly this.
 
 use crate::inventory::{Inventory, is_probably_text};
+use crate::projection::TextProjection;
 use serde::{Deserialize, Serialize};
 
 /// One search hit.
@@ -40,11 +41,14 @@ impl Default for SearchOptions {
 }
 
 /// Searches indexed text files for `pattern`. File order then line order —
-/// fully deterministic. Returns at most `options.limit` hits.
+/// fully deterministic. Returns at most `options.limit` hits. File text is
+/// served through `projection`, so warm queries read no corpus bytes;
+/// files whose text cannot be read are skipped.
 #[must_use]
 pub fn search(
     root: &std::path::Path,
     inventory: &Inventory,
+    projection: &TextProjection,
     pattern: &str,
     options: &SearchOptions,
 ) -> Vec<SearchHit> {
@@ -76,11 +80,18 @@ pub fn search(
                 continue;
             }
         }
+        // Projection first: text already served from memory means the file
+        // was text at index time, so the on-disk probe is skipped too and
+        // warm queries perform no I/O at all. Only a projection miss pays
+        // the 8 KiB text probe and the counted read.
         let path = root.join(&record.rel);
-        if !is_probably_text(&path) {
-            continue;
-        }
-        let Ok(text) = std::fs::read_to_string(&path) else {
+        let projected = projection.get(&record.rel, &record.hash).or_else(|| {
+            if !is_probably_text(&path) {
+                return None;
+            }
+            projection.text(root, &record.rel, &record.hash)
+        });
+        let Some(text) = projected else {
             continue;
         };
         let lines: Vec<&str> = text.lines().collect();

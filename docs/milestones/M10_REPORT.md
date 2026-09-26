@@ -25,6 +25,10 @@ integration, not diagnostic quality. No M13 speed claim (n=1 per mode).
 
 ## Measured runs (`cargo run --offline --example auth_refresh -- MODE`)
 
+> M14 note: the host was generalized into `examples/bench_matrix.rs`
+> (descriptor-driven, five §44 modes + `fixture-check`); the numbers
+> below are as measured in M10 and were not re-run under the new name.
+
 | mode | outcome | max evidence concurrency | wall | revision | recovery | fixture unchanged |
 |---|---|---|---|---|---|---|
 | full | completed | 4 | ~600ms | 1 | recovered_completed | true |

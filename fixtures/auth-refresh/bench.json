@@ -1,0 +1,51 @@
+{
+  "id": "auth-refresh",
+  "class": "C",
+  "objective": "Find why authentication occasionally fails after token refresh and fix it.",
+  "evidence_paths": [
+    "auth-session/src/session.rs",
+    "auth-session/src/reference.rs",
+    "client/src/lib.rs",
+    "auth-session/tests/refresh.rs",
+    "logs/refresh.log"
+  ],
+  "protected_paths": [
+    "Cargo.toml",
+    "Cargo.lock",
+    "auth-session/Cargo.toml",
+    "auth-session/src/lib.rs",
+    "auth-session/src/reference.rs",
+    "auth-session/tests/refresh.rs",
+    "client/Cargo.toml",
+    "client/src/lib.rs",
+    "migrations/001_initial.sql",
+    "logs/refresh.log"
+  ],
+  "change_paths": ["auth-session/src/session.rs"],
+  "contract": {
+    "clauses": [
+      {
+        "kind": "CommandPasses",
+        "command": {
+          "program": "cargo",
+          "args": ["test", "--offline", "--locked"],
+          "cwd": ".",
+          "env": {},
+          "timeout_ms": 180000
+        }
+      },
+      {
+        "kind": "ChangedPathsWithin",
+        "paths": ["auth-session/src/session.rs"]
+      },
+      { "kind": "FileUnchanged", "path": "Cargo.toml" },
+      { "kind": "FileUnchanged", "path": "Cargo.lock" },
+      { "kind": "FileUnchanged", "path": "auth-session/src/reference.rs" },
+      { "kind": "FileUnchanged", "path": "auth-session/tests/refresh.rs" },
+      { "kind": "FileUnchanged", "path": "migrations/001_initial.sql" }
+    ]
+  },
+  "requested_checks": ["auth-session", "client"],
+  "available_checks": ["auth-session", "client", "unrelated-metrics"],
+  "check_note": "Affected risk runs auth-session + client; unrelated metrics only under Full risk"
+}

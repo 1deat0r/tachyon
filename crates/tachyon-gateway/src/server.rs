@@ -1394,7 +1394,7 @@ async fn prepare_run(
         .map_err(|error| core_err(&error))?;
 
     // 7. ToolsContext from the PINNED canonical root, with the trusted
-    //    workspace policy the auth_refresh example uses, carrying the
+    //    workspace policy the bench_matrix example uses, carrying the
     //    run-held lease down into every stage. M11 slice 5: the SAME
     //    `canonical` value that was lease-checked (step 5) and pinned
     //    (step 6) builds the context — `new_from_canonical` performs no
@@ -1692,7 +1692,7 @@ fn is_contract_scope_name(name: &str) -> bool {
 }
 
 /// Trusted-workspace policy plus exactly the three grants the
-/// `auth_refresh` example adds: normal reads/writes/test inside the
+/// `bench_matrix` example adds: normal reads/writes/test inside the
 /// workspace run unattended; everything else still Asks (spec §33).
 fn run_policy() -> Policy {
     let mut policy = Policy::trusted_workspace();

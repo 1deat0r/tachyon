@@ -7,6 +7,7 @@
 
 use crate::inventory::{Inventory, is_probably_text};
 use crate::language::{LanguageBackend, Symbol};
+use crate::projection::TextProjection;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -50,6 +51,7 @@ pub struct SymbolIndex {
     root: std::path::PathBuf,
     backend: Box<dyn LanguageBackend>,
     files: HashMap<String, IndexedFile>,
+    projection: TextProjection,
     /// Index generation: bumped by every build/refresh.
     pub generation: u64,
 }
@@ -61,8 +63,17 @@ impl SymbolIndex {
             root: root.to_path_buf(),
             backend: Box::new(backend),
             files: HashMap::new(),
+            projection: TextProjection::new(),
             generation: 0,
         }
+    }
+
+    /// The text projection fed at index time: pass it to
+    /// [`crate::search::search`] so warm queries serve corpus text from
+    /// memory instead of re-reading files.
+    #[must_use]
+    pub fn projection(&self) -> &TextProjection {
+        &self.projection
     }
 
     /// (Re)builds the index over `inventory`, extracting symbols from text
@@ -100,6 +111,7 @@ impl SymbolIndex {
         let Ok(text) = std::fs::read_to_string(&path) else {
             return;
         };
+        self.projection.put(&record.rel, &record.hash, text.clone());
         let symbols = self.backend.extract(record.language, &text);
         let lines: Vec<&str> = text.lines().collect();
         let with_excerpts = symbols
@@ -151,6 +163,9 @@ impl SymbolIndex {
 
     /// Word-boundary references to `name` across indexed files, excluding
     /// the definition lines themselves. Deterministic file/line order.
+    /// File text comes from the indexed generation via the projection, so
+    /// it stays consistent with the symbols filtered above; callers repair
+    /// staleness against disk through [`Self::verify`] and [`Self::refresh`].
     #[must_use]
     pub fn references(&self, name: &str) -> Vec<Location> {
         let definition_lines: std::collections::HashSet<(&str, u32)> = self
@@ -168,8 +183,10 @@ impl SymbolIndex {
         let mut rels: Vec<&String> = self.files.keys().collect();
         rels.sort();
         for rel in rels {
-            let path = self.root.join(rel);
-            let Ok(text) = std::fs::read_to_string(&path) else {
+            let Some(indexed) = self.files.get(rel.as_str()) else {
+                continue;
+            };
+            let Some(text) = self.projection.text(&self.root, rel, &indexed.hash) else {
                 continue;
             };
             for (index, line) in text.lines().enumerate() {

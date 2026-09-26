@@ -1,0 +1,849 @@
+{
+  "generated": "2026-09-25T12:10:21.650Z",
+  "sha": "84d02e3",
+  "samples_per_cell": 10,
+  "percentiles": "nearest-rank (p50 = sorted[n*50/100], p95 = sorted[min(n*95/100, n-1)])",
+  "configuration": {
+    "provider": "bench-script-<fixture> (FakeModelProvider, scripted queue)",
+    "model": "scripted-replay-1",
+    "note": "pinned scripted provider per docs/11 #11: identical model across every mode by construction (AD-015 same-model rule); no live model IDs in the MVP matrix",
+    "modes": [
+      "full",
+      "no-speculation",
+      "no-judgment",
+      "serial",
+      "reference"
+    ],
+    "alias_modes": "no-speculation and no-judgment are measured aliases of full (no speculation/judgment stage exists in the MVP driver)",
+    "risk": "Affected"
+  },
+  "cells": [
+    {
+      "fixture": "auth-refresh",
+      "class": "C",
+      "mode": "full",
+      "coincides_with": null,
+      "n": 10,
+      "verified_success_rate": 1,
+      "provider": "bench-script-auth-refresh",
+      "model": "scripted-replay-1",
+      "model_calls": {
+        "p50": 1,
+        "p95": 1
+      },
+      "judgment_calls": 0,
+      "jev_calls": 0,
+      "tool_calls": 7,
+      "max_evidence_concurrency": 4,
+      "check_broadening": false,
+      "selected_checks": [
+        "auth-session",
+        "client"
+      ],
+      "check_note": "Affected risk runs auth-session + client; unrelated metrics only under Full risk",
+      "metrics": {
+        "completion_ms": {
+          "p50": 364,
+          "p95": 393
+        },
+        "task_wall_ms": {
+          "p50": 364,
+          "p95": 394
+        },
+        "harness_ms": {
+          "p50": 594,
+          "p95": 1342
+        },
+        "first_evidence_ms": {
+          "p50": 5,
+          "p95": 14
+        },
+        "first_edit_ms": {
+          "p50": 32,
+          "p95": 48
+        },
+        "model_ms": {
+          "p50": 0.01217,
+          "p95": 0.015851
+        }
+      }
+    },
+    {
+      "fixture": "auth-refresh",
+      "class": "C",
+      "mode": "no-speculation",
+      "coincides_with": "full",
+      "n": 10,
+      "verified_success_rate": 1,
+      "provider": "bench-script-auth-refresh",
+      "model": "scripted-replay-1",
+      "model_calls": {
+        "p50": 1,
+        "p95": 1
+      },
+      "judgment_calls": 0,
+      "jev_calls": 0,
+      "tool_calls": 7,
+      "max_evidence_concurrency": 4,
+      "check_broadening": false,
+      "selected_checks": [
+        "auth-session",
+        "client"
+      ],
+      "check_note": "Affected risk runs auth-session + client; unrelated metrics only under Full risk",
+      "metrics": {
+        "completion_ms": {
+          "p50": 369,
+          "p95": 403
+        },
+        "task_wall_ms": {
+          "p50": 369,
+          "p95": 403
+        },
+        "harness_ms": {
+          "p50": 597,
+          "p95": 670
+        },
+        "first_evidence_ms": {
+          "p50": 5,
+          "p95": 5
+        },
+        "first_edit_ms": {
+          "p50": 32,
+          "p95": 40
+        },
+        "model_ms": {
+          "p50": 0.012931,
+          "p95": 0.01383
+        }
+      }
+    },
+    {
+      "fixture": "auth-refresh",
+      "class": "C",
+      "mode": "no-judgment",
+      "coincides_with": "full",
+      "n": 10,
+      "verified_success_rate": 1,
+      "provider": "bench-script-auth-refresh",
+      "model": "scripted-replay-1",
+      "model_calls": {
+        "p50": 1,
+        "p95": 1
+      },
+      "judgment_calls": 0,
+      "jev_calls": 0,
+      "tool_calls": 7,
+      "max_evidence_concurrency": 4,
+      "check_broadening": false,
+      "selected_checks": [
+        "auth-session",
+        "client"
+      ],
+      "check_note": "Affected risk runs auth-session + client; unrelated metrics only under Full risk",
+      "metrics": {
+        "completion_ms": {
+          "p50": 384,
+          "p95": 443
+        },
+        "task_wall_ms": {
+          "p50": 385,
+          "p95": 444
+        },
+        "harness_ms": {
+          "p50": 607,
+          "p95": 1357
+        },
+        "first_evidence_ms": {
+          "p50": 5,
+          "p95": 13
+        },
+        "first_edit_ms": {
+          "p50": 33,
+          "p95": 78
+        },
+        "model_ms": {
+          "p50": 0.013241000000000001,
+          "p95": 0.01573
+        }
+      }
+    },
+    {
+      "fixture": "auth-refresh",
+      "class": "C",
+      "mode": "serial",
+      "coincides_with": null,
+      "n": 10,
+      "verified_success_rate": 1,
+      "provider": "bench-script-auth-refresh",
+      "model": "scripted-replay-1",
+      "model_calls": {
+        "p50": 1,
+        "p95": 1
+      },
+      "judgment_calls": 0,
+      "jev_calls": 0,
+      "tool_calls": 7,
+      "max_evidence_concurrency": 1,
+      "check_broadening": false,
+      "selected_checks": [
+        "auth-session",
+        "client"
+      ],
+      "check_note": "Affected risk runs auth-session + client; unrelated metrics only under Full risk",
+      "metrics": {
+        "completion_ms": {
+          "p50": 388,
+          "p95": 401
+        },
+        "task_wall_ms": {
+          "p50": 389,
+          "p95": 402
+        },
+        "harness_ms": {
+          "p50": 612,
+          "p95": 712
+        },
+        "first_evidence_ms": {
+          "p50": 5,
+          "p95": 9
+        },
+        "first_edit_ms": {
+          "p50": 35,
+          "p95": 43
+        },
+        "model_ms": {
+          "p50": 0.011770000000000001,
+          "p95": 0.014911
+        }
+      }
+    },
+    {
+      "fixture": "auth-refresh",
+      "class": "C",
+      "mode": "reference",
+      "coincides_with": null,
+      "n": 10,
+      "verified_success_rate": 1,
+      "provider": "bench-script-auth-refresh",
+      "model": "scripted-replay-1",
+      "model_calls": {
+        "p50": 1,
+        "p95": 1
+      },
+      "judgment_calls": 0,
+      "jev_calls": 0,
+      "tool_calls": 7,
+      "max_evidence_concurrency": 1,
+      "check_broadening": false,
+      "selected_checks": [
+        "auth-session",
+        "client"
+      ],
+      "check_note": "Affected risk runs auth-session + client; unrelated metrics only under Full risk",
+      "metrics": {
+        "completion_ms": {
+          "p50": 293,
+          "p95": 411
+        },
+        "task_wall_ms": {
+          "p50": 108,
+          "p95": 206
+        },
+        "harness_ms": {
+          "p50": 557,
+          "p95": 1595
+        },
+        "first_evidence_ms": {
+          "p50": 0,
+          "p95": 0
+        },
+        "first_edit_ms": {
+          "p50": 108,
+          "p95": 206
+        },
+        "model_ms": {
+          "p50": 0.00943,
+          "p95": 0.01098
+        }
+      }
+    },
+    {
+      "fixture": "multi-file-migration",
+      "class": "D",
+      "mode": "full",
+      "coincides_with": null,
+      "n": 10,
+      "verified_success_rate": 1,
+      "provider": "bench-script-multi-file-migration",
+      "model": "scripted-replay-1",
+      "model_calls": {
+        "p50": 1,
+        "p95": 1
+      },
+      "judgment_calls": 0,
+      "jev_calls": 0,
+      "tool_calls": 8,
+      "max_evidence_concurrency": 5,
+      "check_broadening": false,
+      "selected_checks": [
+        "billing",
+        "reporting"
+      ],
+      "check_note": "Affected risk runs billing + reporting; audit-unrelated only under Full risk",
+      "metrics": {
+        "completion_ms": {
+          "p50": 585,
+          "p95": 699
+        },
+        "task_wall_ms": {
+          "p50": 586,
+          "p95": 700
+        },
+        "harness_ms": {
+          "p50": 1325,
+          "p95": 1481
+        },
+        "first_evidence_ms": {
+          "p50": 14,
+          "p95": 31
+        },
+        "first_edit_ms": {
+          "p50": 108,
+          "p95": 120
+        },
+        "model_ms": {
+          "p50": 0.01043,
+          "p95": 0.01296
+        }
+      }
+    },
+    {
+      "fixture": "multi-file-migration",
+      "class": "D",
+      "mode": "no-speculation",
+      "coincides_with": "full",
+      "n": 10,
+      "verified_success_rate": 1,
+      "provider": "bench-script-multi-file-migration",
+      "model": "scripted-replay-1",
+      "model_calls": {
+        "p50": 1,
+        "p95": 1
+      },
+      "judgment_calls": 0,
+      "jev_calls": 0,
+      "tool_calls": 8,
+      "max_evidence_concurrency": 5,
+      "check_broadening": false,
+      "selected_checks": [
+        "billing",
+        "reporting"
+      ],
+      "check_note": "Affected risk runs billing + reporting; audit-unrelated only under Full risk",
+      "metrics": {
+        "completion_ms": {
+          "p50": 650,
+          "p95": 766
+        },
+        "task_wall_ms": {
+          "p50": 651,
+          "p95": 767
+        },
+        "harness_ms": {
+          "p50": 1640,
+          "p95": 2011
+        },
+        "first_evidence_ms": {
+          "p50": 17,
+          "p95": 51
+        },
+        "first_edit_ms": {
+          "p50": 117,
+          "p95": 166
+        },
+        "model_ms": {
+          "p50": 0.00949,
+          "p95": 0.02027
+        }
+      }
+    },
+    {
+      "fixture": "multi-file-migration",
+      "class": "D",
+      "mode": "no-judgment",
+      "coincides_with": "full",
+      "n": 10,
+      "verified_success_rate": 1,
+      "provider": "bench-script-multi-file-migration",
+      "model": "scripted-replay-1",
+      "model_calls": {
+        "p50": 1,
+        "p95": 1
+      },
+      "judgment_calls": 0,
+      "jev_calls": 0,
+      "tool_calls": 8,
+      "max_evidence_concurrency": 5,
+      "check_broadening": false,
+      "selected_checks": [
+        "billing",
+        "reporting"
+      ],
+      "check_note": "Affected risk runs billing + reporting; audit-unrelated only under Full risk",
+      "metrics": {
+        "completion_ms": {
+          "p50": 500,
+          "p95": 776
+        },
+        "task_wall_ms": {
+          "p50": 501,
+          "p95": 777
+        },
+        "harness_ms": {
+          "p50": 916,
+          "p95": 1955
+        },
+        "first_evidence_ms": {
+          "p50": 15,
+          "p95": 28
+        },
+        "first_edit_ms": {
+          "p50": 120,
+          "p95": 177
+        },
+        "model_ms": {
+          "p50": 0.01065,
+          "p95": 0.012261
+        }
+      }
+    },
+    {
+      "fixture": "multi-file-migration",
+      "class": "D",
+      "mode": "serial",
+      "coincides_with": null,
+      "n": 10,
+      "verified_success_rate": 1,
+      "provider": "bench-script-multi-file-migration",
+      "model": "scripted-replay-1",
+      "model_calls": {
+        "p50": 1,
+        "p95": 1
+      },
+      "judgment_calls": 0,
+      "jev_calls": 0,
+      "tool_calls": 8,
+      "max_evidence_concurrency": 1,
+      "check_broadening": false,
+      "selected_checks": [
+        "billing",
+        "reporting"
+      ],
+      "check_note": "Affected risk runs billing + reporting; audit-unrelated only under Full risk",
+      "metrics": {
+        "completion_ms": {
+          "p50": 494,
+          "p95": 3179
+        },
+        "task_wall_ms": {
+          "p50": 494,
+          "p95": 3180
+        },
+        "harness_ms": {
+          "p50": 786,
+          "p95": 4453
+        },
+        "first_evidence_ms": {
+          "p50": 18,
+          "p95": 227
+        },
+        "first_edit_ms": {
+          "p50": 124,
+          "p95": 1713
+        },
+        "model_ms": {
+          "p50": 0.010920000000000001,
+          "p95": 0.013380999999999999
+        }
+      }
+    },
+    {
+      "fixture": "multi-file-migration",
+      "class": "D",
+      "mode": "reference",
+      "coincides_with": null,
+      "n": 10,
+      "verified_success_rate": 1,
+      "provider": "bench-script-multi-file-migration",
+      "model": "scripted-replay-1",
+      "model_calls": {
+        "p50": 1,
+        "p95": 1
+      },
+      "judgment_calls": 0,
+      "jev_calls": 0,
+      "tool_calls": 8,
+      "max_evidence_concurrency": 1,
+      "check_broadening": false,
+      "selected_checks": [
+        "billing",
+        "reporting"
+      ],
+      "check_note": "Affected risk runs billing + reporting; audit-unrelated only under Full risk",
+      "metrics": {
+        "completion_ms": {
+          "p50": 809,
+          "p95": 1720
+        },
+        "task_wall_ms": {
+          "p50": 664,
+          "p95": 1471
+        },
+        "harness_ms": {
+          "p50": 1093,
+          "p95": 1893
+        },
+        "first_evidence_ms": {
+          "p50": 0,
+          "p95": 0
+        },
+        "first_edit_ms": {
+          "p50": 664,
+          "p95": 1471
+        },
+        "model_ms": {
+          "p50": 0.00687,
+          "p95": 0.007430999999999999
+        }
+      }
+    },
+    {
+      "fixture": "architecture-plan",
+      "class": "E",
+      "mode": "full",
+      "coincides_with": null,
+      "n": 10,
+      "verified_success_rate": 1,
+      "provider": "bench-script-architecture-plan",
+      "model": "scripted-replay-1",
+      "model_calls": {
+        "p50": 1,
+        "p95": 1
+      },
+      "judgment_calls": 0,
+      "jev_calls": 0,
+      "tool_calls": 6,
+      "max_evidence_concurrency": 3,
+      "check_broadening": false,
+      "selected_checks": [
+        "renderer"
+      ],
+      "check_note": "Affected risk runs renderer; catalog only under Full risk",
+      "metrics": {
+        "completion_ms": {
+          "p50": 505,
+          "p95": 3432
+        },
+        "task_wall_ms": {
+          "p50": 505,
+          "p95": 3433
+        },
+        "harness_ms": {
+          "p50": 865,
+          "p95": 5684
+        },
+        "first_evidence_ms": {
+          "p50": 20,
+          "p95": 222
+        },
+        "first_edit_ms": {
+          "p50": 115,
+          "p95": 1836
+        },
+        "model_ms": {
+          "p50": 0.01453,
+          "p95": 0.0172
+        }
+      }
+    },
+    {
+      "fixture": "architecture-plan",
+      "class": "E",
+      "mode": "no-speculation",
+      "coincides_with": "full",
+      "n": 10,
+      "verified_success_rate": 1,
+      "provider": "bench-script-architecture-plan",
+      "model": "scripted-replay-1",
+      "model_calls": {
+        "p50": 1,
+        "p95": 1
+      },
+      "judgment_calls": 0,
+      "jev_calls": 0,
+      "tool_calls": 6,
+      "max_evidence_concurrency": 3,
+      "check_broadening": false,
+      "selected_checks": [
+        "renderer"
+      ],
+      "check_note": "Affected risk runs renderer; catalog only under Full risk",
+      "metrics": {
+        "completion_ms": {
+          "p50": 602,
+          "p95": 3870
+        },
+        "task_wall_ms": {
+          "p50": 603,
+          "p95": 3870
+        },
+        "harness_ms": {
+          "p50": 2042,
+          "p95": 9471
+        },
+        "first_evidence_ms": {
+          "p50": 16,
+          "p95": 310
+        },
+        "first_edit_ms": {
+          "p50": 118,
+          "p95": 2436
+        },
+        "model_ms": {
+          "p50": 0.01322,
+          "p95": 0.01855
+        }
+      }
+    },
+    {
+      "fixture": "architecture-plan",
+      "class": "E",
+      "mode": "no-judgment",
+      "coincides_with": "full",
+      "n": 10,
+      "verified_success_rate": 1,
+      "provider": "bench-script-architecture-plan",
+      "model": "scripted-replay-1",
+      "model_calls": {
+        "p50": 1,
+        "p95": 1
+      },
+      "judgment_calls": 0,
+      "jev_calls": 0,
+      "tool_calls": 6,
+      "max_evidence_concurrency": 3,
+      "check_broadening": false,
+      "selected_checks": [
+        "renderer"
+      ],
+      "check_note": "Affected risk runs renderer; catalog only under Full risk",
+      "metrics": {
+        "completion_ms": {
+          "p50": 805,
+          "p95": 3279
+        },
+        "task_wall_ms": {
+          "p50": 805,
+          "p95": 3280
+        },
+        "harness_ms": {
+          "p50": 1422,
+          "p95": 5092
+        },
+        "first_evidence_ms": {
+          "p50": 48,
+          "p95": 359
+        },
+        "first_edit_ms": {
+          "p50": 290,
+          "p95": 1987
+        },
+        "model_ms": {
+          "p50": 0.015331,
+          "p95": 0.032159999999999994
+        }
+      }
+    },
+    {
+      "fixture": "architecture-plan",
+      "class": "E",
+      "mode": "serial",
+      "coincides_with": null,
+      "n": 10,
+      "verified_success_rate": 1,
+      "provider": "bench-script-architecture-plan",
+      "model": "scripted-replay-1",
+      "model_calls": {
+        "p50": 1,
+        "p95": 1
+      },
+      "judgment_calls": 0,
+      "jev_calls": 0,
+      "tool_calls": 6,
+      "max_evidence_concurrency": 1,
+      "check_broadening": false,
+      "selected_checks": [
+        "renderer"
+      ],
+      "check_note": "Affected risk runs renderer; catalog only under Full risk",
+      "metrics": {
+        "completion_ms": {
+          "p50": 567,
+          "p95": 3034
+        },
+        "task_wall_ms": {
+          "p50": 567,
+          "p95": 3035
+        },
+        "harness_ms": {
+          "p50": 1480,
+          "p95": 4815
+        },
+        "first_evidence_ms": {
+          "p50": 19,
+          "p95": 243
+        },
+        "first_edit_ms": {
+          "p50": 154,
+          "p95": 1918
+        },
+        "model_ms": {
+          "p50": 0.017560000000000003,
+          "p95": 0.024121
+        }
+      }
+    },
+    {
+      "fixture": "architecture-plan",
+      "class": "E",
+      "mode": "reference",
+      "coincides_with": null,
+      "n": 10,
+      "verified_success_rate": 1,
+      "provider": "bench-script-architecture-plan",
+      "model": "scripted-replay-1",
+      "model_calls": {
+        "p50": 1,
+        "p95": 1
+      },
+      "judgment_calls": 0,
+      "jev_calls": 0,
+      "tool_calls": 6,
+      "max_evidence_concurrency": 1,
+      "check_broadening": false,
+      "selected_checks": [
+        "renderer"
+      ],
+      "check_note": "Affected risk runs renderer; catalog only under Full risk",
+      "metrics": {
+        "completion_ms": {
+          "p50": 242,
+          "p95": 1965
+        },
+        "task_wall_ms": {
+          "p50": 79,
+          "p95": 1807
+        },
+        "harness_ms": {
+          "p50": 495,
+          "p95": 2218
+        },
+        "first_evidence_ms": {
+          "p50": 0,
+          "p95": 0
+        },
+        "first_edit_ms": {
+          "p50": 79,
+          "p95": 1807
+        },
+        "model_ms": {
+          "p50": 0.010839999999999999,
+          "p95": 0.010961
+        }
+      }
+    }
+  ],
+  "legs": [
+    {
+      "corpus": "fixtures/auth-refresh",
+      "corpus_files": 15,
+      "definitions": 1,
+      "judgment_calls": 0,
+      "leg": "A",
+      "model_calls": 0,
+      "n": 50,
+      "p50_us": 33,
+      "p95_us": 35,
+      "references": 7,
+      "request": "Where is complete_refresh defined and used?",
+      "route_class": "direct_native",
+      "verified": true,
+      "zero_llm_basis": "plan.requires_model()==false asserted on every sample; no provider constructed"
+    },
+    {
+      "answer_cites_both": true,
+      "corpus": "fixtures/auth-refresh",
+      "evidence_first": true,
+      "judgment_calls": 0,
+      "leg": "B",
+      "model_calls": 1,
+      "n": 20,
+      "p50_us": 38,
+      "p95_us": 47,
+      "request": "Explain why auth-session/src/session.rs and auth-session/src/reference.rs behave differently",
+      "route_class": "hybrid",
+      "verified": true
+    }
+  ],
+  "comparisons": {
+    "auth-refresh": {
+      "full_vs_serial": {
+        "completion_p50_full": 364,
+        "completion_p50_serial": 388,
+        "first_evidence_p50_full": 5,
+        "first_evidence_p50_serial": 5
+      },
+      "full_vs_reference": {
+        "completion_p50_full": 364,
+        "completion_p50_reference": 293,
+        "ttfr_p50_full": 32,
+        "ttfr_p50_reference": 108,
+        "verified_full": 1,
+        "verified_reference": 1
+      }
+    },
+    "multi-file-migration": {
+      "full_vs_serial": {
+        "completion_p50_full": 585,
+        "completion_p50_serial": 494,
+        "first_evidence_p50_full": 14,
+        "first_evidence_p50_serial": 18
+      },
+      "full_vs_reference": {
+        "completion_p50_full": 585,
+        "completion_p50_reference": 809,
+        "ttfr_p50_full": 108,
+        "ttfr_p50_reference": 664,
+        "verified_full": 1,
+        "verified_reference": 1
+      }
+    },
+    "architecture-plan": {
+      "full_vs_serial": {
+        "completion_p50_full": 505,
+        "completion_p50_serial": 567,
+        "first_evidence_p50_full": 20,
+        "first_evidence_p50_serial": 19
+      },
+      "full_vs_reference": {
+        "completion_p50_full": 505,
+        "completion_p50_reference": 242,
+        "ttfr_p50_full": 115,
+        "ttfr_p50_reference": 79,
+        "verified_full": 1,
+        "verified_reference": 1
+      }
+    }
+  }
+}

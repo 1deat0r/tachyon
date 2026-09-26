@@ -4,7 +4,7 @@
 //! equality on the ORIGINAL root, the documented equivalent of the
 //! plan's `git diff --exit-code` since running git inside tests is
 //! awkward), gateway started with a fake/scripted provider armed
-//! EXACTLY like the `auth_refresh` example, `StartRun` with default
+//! EXACTLY like the `bench_matrix` example, `StartRun` with default
 //! acceptance detection (Cargo workspace), the shared driver driven to
 //! durable `Completed`, and a LIVE subscriber observing `stage`,
 //! `changed_files`, `agent_message` and `verification_finished`.

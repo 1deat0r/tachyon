@@ -1,0 +1,52 @@
+{
+  "id": "multi-file-migration",
+  "class": "D",
+  "objective": "Fix the drifted tax rounding in both billing and reporting so half-cent cases round half-up, without touching unrelated crates.",
+  "evidence_paths": [
+    "billing/src/tax.rs",
+    "billing/src/lib.rs",
+    "billing/tests/tax_test.rs",
+    "reporting/src/tax.rs",
+    "reporting/src/lib.rs",
+    "reporting/tests/tax_test.rs"
+  ],
+  "protected_paths": [
+    "Cargo.toml",
+    "Cargo.lock",
+    "billing/Cargo.toml",
+    "billing/src/lib.rs",
+    "billing/tests/tax_test.rs",
+    "reporting/Cargo.toml",
+    "reporting/src/lib.rs",
+    "reporting/tests/tax_test.rs",
+    "audit-unrelated/Cargo.toml",
+    "audit-unrelated/src/lib.rs"
+  ],
+  "change_paths": ["billing/src/tax.rs", "reporting/src/tax.rs"],
+  "contract": {
+    "clauses": [
+      {
+        "kind": "CommandPasses",
+        "command": {
+          "program": "cargo",
+          "args": ["test", "--offline", "--locked"],
+          "cwd": ".",
+          "env": {},
+          "timeout_ms": 180000
+        }
+      },
+      {
+        "kind": "ChangedPathsWithin",
+        "paths": ["billing/src/tax.rs", "reporting/src/tax.rs"]
+      },
+      { "kind": "FileUnchanged", "path": "Cargo.toml" },
+      { "kind": "FileUnchanged", "path": "Cargo.lock" },
+      { "kind": "FileUnchanged", "path": "billing/tests/tax_test.rs" },
+      { "kind": "FileUnchanged", "path": "reporting/tests/tax_test.rs" },
+      { "kind": "FileUnchanged", "path": "audit-unrelated/src/lib.rs" }
+    ]
+  },
+  "requested_checks": ["billing", "reporting"],
+  "available_checks": ["billing", "reporting", "audit-unrelated"],
+  "check_note": "Affected risk runs billing + reporting; audit-unrelated only under Full risk"
+}

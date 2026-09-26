@@ -4,9 +4,28 @@ This file is updated by the implementing agent after every milestone.
 
 ## Current milestone
 
-Milestone 14 — next (Milestone 13 complete, see gates below)
+Milestone 15 — none planned; MVP frozen at Milestone 14 (post-MVP work
+is tracked by issues and the docs/04/§46 deferrals, see `MVP_REPORT.md`).
 
 ## Completed gates
+
+- 2026-09-25 Milestone 14 — MVP freeze: full spec §44 benchmark matrix
+  (3 fixtures × 5 modes × n=10 = 150 driver runs + Class A/B composed
+  legs) through the descriptor-driven `bench_matrix` host (generalizes
+  the M10 `auth_refresh` example); 150/150 verified success at equal
+  full/reference rates, median TTFR (first edit) full p50 32/108/115 ms
+  vs reference 108/664/79 ms (2 of 3 faster), verification dominates
+  completion (77–91%); §42 security escape + recovery fault-injection
+  suites run explicitly as a gate incl. a structural no-TCP-exposure
+  check with positive controls; two new fixtures (`multi-file-migration`
+  Class D, `architecture-plan` Class E) with broken-first/solution
+  self-check gates; M13 watch item closed — content-addressed text
+  projection, warm queries read 0 corpus bytes over 478 files (100
+  iterations), T5 re-measured 14.43→10.30 ms p50; docs/11 decisions
+  recorded (#2 TUI-first/ACP post-MVP, #1 kill criteria in MVP_REPORT,
+  #11 pinned scripted provider); §45 dispositions 10 MET / 1 PARTIAL
+  (performance claim stated as PARTIAL). Report: `MVP_REPORT.md`,
+  artifact: `docs/milestones/M14_MATRIX.json`.
 
 - 2026-09-25 Milestone 13 — Performance campaign: release-mode,
   ignore-gated harness (`tests/perf.rs` in eight crates) measuring all

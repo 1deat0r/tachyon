@@ -28,6 +28,9 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+# M14 matrix host: the TimedProvider decorator implements ModelProvider.
+async-trait = { workspace = true }
+
 [target.'cfg(windows)'.dev-dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",

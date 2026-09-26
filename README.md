@@ -8,9 +8,10 @@ genuine unresolved uncertainty.
 
 > LLMs are reasoning accelerators, not Tachyon's operating system.
 
-**Status (Sep 2026):** early implementation. Milestone 13
-(performance campaign) is implemented and gated; see
-[`PROGRESS.md`](PROGRESS.md). Not yet a daily
+**Status (Sep 2026):** MVP frozen at Milestone 14
+(benchmark matrix + security/recovery suites + `MVP_REPORT.md`) —
+see [`PROGRESS.md`](PROGRESS.md) and
+[`MVP_REPORT.md`](MVP_REPORT.md). Not yet a daily
 driver — watch this repo if the architecture interests you.
 
 ## Quickstart
