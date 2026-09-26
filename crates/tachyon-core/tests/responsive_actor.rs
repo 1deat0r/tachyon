@@ -95,6 +95,8 @@ async fn poll_pending(future: std::pin::Pin<&mut impl std::future::Future>) {
 }
 
 /// One poll: true when the future is still pending, without waiting on it.
+/// Unix-only today: the Windows path probes liveness through the child PID.
+#[cfg(unix)]
 async fn still_pending(future: std::pin::Pin<&mut impl std::future::Future>) -> bool {
     let mut future = future;
     std::future::poll_fn(|cx| std::task::Poll::Ready(future.as_mut().poll(cx).is_pending())).await
@@ -336,25 +338,16 @@ async fn cancel_acknowledges_after_real_reap_while_the_mailbox_serves() {
 
     let mut cancel = Box::pin(f.task.cancel());
     poll_pending(cancel.as_mut()).await;
-    // The control intent is durable before the drain, while the real effect
-    // worker is still alive: an acknowledgement is not a claim of cleanup.
+    // The intent must be durable — a liveness claim about the journal alone.
+    // `control()` fires the cancel token before it journals the `Cancelled`
+    // transition, so the real reap can finish while that write is still
+    // committing on a loaded runner: "already reaped when the row was
+    // observed durable" is a legitimate interleaving, not a defect, and is
+    // deliberately not asserted here. The orderings below read current
+    // state instead of comparing two observation times.
     assert!(
         durable_status(&f.store, f.task.task_id(), "Cancelled").await,
-        "cancel intent was not durable before the drain"
-    );
-    #[cfg(unix)]
-    assert!(
-        still_pending(eof.as_mut()).await,
-        "the child was already reaped when the cancel intent became durable"
-    );
-    #[cfg(windows)]
-    assert!(
-        !pid_dead(child_pid),
-        "the child was already reaped when the cancel intent became durable"
-    );
-    assert!(
-        still_pending(cancel.as_mut()).await,
-        "the cancel was acknowledged before the effect workers drained"
+        "the durable Cancelled intent never appeared"
     );
     // Reads stay serviceable while that acknowledgement waits for real cleanup.
     let observed = tokio::time::timeout(Duration::from_secs(2), f.task.get_state())
@@ -366,23 +359,22 @@ async fn cancel_acknowledges_after_real_reap_while_the_mailbox_serves() {
         .await
         .expect("the cancel acknowledgement never arrived")
         .unwrap();
+    // The acknowledgement is answered only after every owned effect worker
+    // has drained, so at the instant it is observed the real child must
+    // already be gone. This reads current state (socket EOF / process
+    // handle), never the gap between two observations, so scheduler delay
+    // cannot fail it — yet a child that is still live here proves the
+    // acknowledgement outran the reap.
     #[cfg(unix)]
-    tokio::time::timeout(Duration::from_secs(10), eof)
-        .await
-        .expect("the child socket never closed: the acknowledgement preceded the actual reap");
+    assert!(
+        !still_pending(eof.as_mut()).await,
+        "the cancel was acknowledged while the child still lived"
+    );
     #[cfg(windows)]
-    {
-        // Socket closure is not a reap proof on Windows (RST/FIN/lingering
-        // handles vary); the PID itself is.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-        while !pid_dead(child_pid) {
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "the child PID survived termination: the acknowledgement preceded the actual reap"
-            );
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    }
+    assert!(
+        pid_dead(child_pid),
+        "the cancel was acknowledged while the child still lived"
+    );
     let refused = pending.await.unwrap();
     assert_eq!(acked.status, TaskStatus::Cancelled);
     assert!(refused.is_err(), "pending work survived cancellation");
