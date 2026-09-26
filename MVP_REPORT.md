@@ -52,31 +52,34 @@
 
 `full` mode (p50/p95 ms, n=10 per cell):
 
+150/150 driver runs verified successfully.
+
 | Fixture | completion | TTFR (first edit) | first visible progress | task wall |
 |---|---|---|---|---|
-| auth-refresh | 364/393 | 32/48 | 5/14 | 364/394 |
-| multi-file-migration | 585/699 | 108/120 | 14/31 | 586/700 |
-| architecture-plan | 505/3432 | 115/1836 | 20/222 | 505/3433 |
+| auth-refresh | 318/374 | 1/1 | 0/0 | 319/375 |
+| multi-file-migration | 287/311 | 1/2 | 0/1 | 287/311 |
+| architecture-plan | 360/431 | 1/2 | 0/0 | 361/432 |
 
 Controls, p50 (completion / TTFR):
 
 | Fixture | serial (p50) | reference (p50) | full vs serial | full vs reference |
 |---|---|---|---|---|
-| auth-refresh | 388 / 35 | 293 / 108 | faster both | slower completion, **3.4× faster TTFR** |
-| multi-file-migration | 494 / 124 | 809 / 664 | slower completion (noise), faster TTFR | **1.4× faster completion, 6.1× faster TTFR** |
-| architecture-plan | 567 / 154 | 242 / 79 | faster both | slower both |
+| auth-refresh | 296 / 1 | 155 / 0 | completion within noise, TTFR equal | slower completion, **equal TTFR at 1 ms granularity** |
+| multi-file-migration | 308 / 1 | 144 / 0 | faster completion, TTFR equal | slower completion, TTFR equal |
+| architecture-plan | 337 / 2 | 148 / 0 | completion within noise, TTFR equal | slower completion, TTFR equal |
 
-- The alias modes track `full` within noise (e.g. auth-refresh completion p50 369/384 vs 364)
+- The alias modes track `full` within noise (all alias cells coincide with
+  `full` by construction, and every alias sample carries `coincides_with: full`)
   and report `coincides_with: full` in every sample — there is no speculation or judgment
   stage in the MVP driver to disable.
 - **Honest reading:** with a *scripted* model (call cost ≈ 0.01 ms), the pipeline's overlap
   advantage has nothing to amortize, so the supervisor path's journal + verification-tail
-  overhead shows up in raw wall time. `full` beats the reference on median TTFR in 2 of 3
-  tasks and on median completion in 1 of 3, at equal verified success — **PARTIAL**, not a
-  general speed claim (see Known limitations; §45 row 11).
-- Tails are dominated by cold-ish `cargo test` recompiles in fresh scratch workspaces
-  (architecture-plan p95 3432 ms, one multi-file serial sample 3179 ms) — real measured
-  maxima at n=10, not sustained latencies.
+  overhead shows up in raw wall time. Every mode verifies 150/150 at equal verified
+  success, but on wall-clock completion the serial control is fastest on all three
+  fixtures — **PARTIAL**, not a general speed claim (see Known limitations; §45 row 11).
+  TTFR at 1 ms granularity cannot separate the modes on these tiny fixtures (see below).
+- Completion tails (e.g. architecture-plan p95 431 ms) are real measured maxima at n=10,
+  not sustained latencies.
 
 ## Critical-path breakdown
 
@@ -84,25 +87,35 @@ p50 stage shares of `full` completion (from the same samples):
 
 | Stage | auth-refresh | multi-file-migration | architecture-plan |
 |---|---|---|---|
-| startup → first evidence | 5 ms | 14 ms | 20 ms |
-| model (scripted invoke, measured) | 0.012 ms | 0.010 ms | 0.015 ms |
-| evidence → first committed edit | 27 ms | 94 ms | 95 ms |
-| edit → final verification (cargo test) | 332 ms | 477 ms | 390 ms |
-| **completion p50** | **364 ms** | **585 ms** | **505 ms** |
+| startup → first evidence | 0 ms | 0 ms | 0 ms |
+| model (scripted invoke, measured) | 0.009 ms | 0.007 ms | 0.009 ms |
+| evidence → first committed edit | 1 ms | 1 ms | 1 ms |
+| edit → final verification (cargo test) | 317 ms | 286 ms | 359 ms |
+| **completion p50** | **318 ms** | **287 ms** | **360 ms** |
 
-- **Verification dominates** (≈ 77–91 % of completion, derived as
+- **Verification dominates** (≈ 99 % of completion, derived as
   completion p50 − first-edit p50 per fixture): one `cargo test --offline
   --locked` through the policy-bound process runner. Mutation (fsync'd
-  journal + rename) is second. Evidence acquisition and model wait are
-  noise with a scripted provider.
+  journal + rename) plus the truncated sub-millisecond evidence/model
+  prefix make up the remaining ~1 ms.
+- **TTFR granularity caveat (new artifact):** `first_evidence_ms` and
+  `first_edit_ms` both read 0–1 ms on every cell of the new run — the ms
+  clock cannot resolve evidence/model/mutation apart on fixtures this
+  small, so TTFR comparisons between modes are ties, not wins. The
+  previous artifact resolved 5–20 ms / 32–124 ms on the same fixtures
+  (identical driver code, warmer page cache); both runs agree that these
+  stages are ≤ 1 % of completion and that cargo-test verification is the
+  critical path. A microsecond-resolution stage breakdown is deferred
+  work, not a freeze requirement.
 - Evidence runs **concurrently** in `full` (max overlap 4/5/3 across fixtures) and
   serially in `serial`/`reference` (measured 1) — the mode switch behaves as specified.
-- Composed legs (route → repo, fixture corpus of 15 files): Class A **33/35 µs** p50/p95,
-  Class B **38/47 µs** p50/p95 (one scripted call). M13's micro legs still frame the
+- Composed legs (route → repo, fixture corpus of 15 files, n=50/20):
+  Class A 31/40, Class B 34/39 µs p50/p95 (one scripted call for B).
+  M13's micro legs still frame the
   transport/router edges: T1 route p95 1.65 µs, T3 gateway command p95 16.2 µs, T4 first
   frame p95 ~202 µs.
 - **Post-projection re-measure** of M13's T5 (warm symbol/reference over this workspace,
-  478 files): p50 10.30 ms / p95 11.01 ms PASS — improved from M13's 14.43/15.15 ms now
+  478 files): p50 10.11 ms / p95 10.59 ms PASS — improved from M13's 14.43/15.15 ms now
   that warm queries no longer re-read the corpus (G7). Remaining cost is the in-memory
   scan itself, not I/O.
 - A single end-to-end client-visible composition (task creation → first replayed journal
@@ -112,7 +125,7 @@ p50 stage shares of `full` completion (from the same samples):
 
 - **Model calls:** exactly 1 per run in every cell (p50 = p95 = 1), scripted
   `bench-script-<fixture>` / `scripted-replay-1`, measured invoke duration
-  p50 0.007–0.018 ms across cells. Leg A: 0 calls (asserted
+  p50 0.005–0.010 ms across cells. Leg A: 0 calls (asserted
   `plan.requires_model() == false` on all 50 samples; no provider
   constructed). Leg B: exactly 1 call (asserted `request_count() == 1`),
   answer cited both source paths every sample.
@@ -146,6 +159,9 @@ p50 stage shares of `full` completion (from the same samples):
 4. **No end-to-end client-visible composition.** Driver-level `first_evidence_ms` stands in
    for first visible progress; gateway transport legs come from M13's separate T3/T4
    measurements. The creation→first-replayed-event composition remains unbuilt.
+   At 1 ms granularity the driver stage markers additionally cannot resolve
+   evidence/model/mutation apart on fixtures this small (see the TTFR caveat above);
+   cross-mode TTFR reads are ties, and the completion comparison is the load-bearing one.
 5. **Alias modes are structural.** `no-speculation`/`no-judgment` prove the modes are
    accepted and equivalent; they cannot show a difference until speculation/judgment stages
    exist on these paths.
@@ -193,7 +209,7 @@ Numeric stop/pivot gates adopted at freeze (docs/11 #1; owner review before publ
 |---|---|---|---|
 | 1 | CLI and TUI are usable gateway clients | MET | M11 gate: nine-pane TUI, `attach` + run/ps/pause/resume/cancel aliases, approval wait; M11 report |
 | 2 | local gateway persists across client disconnects | MET | M11 gate: disconnect/close leaves tasks untouched; reconnect gapless replay |
-| 3 | simple repository questions commonly use zero LLM calls | MET | Leg A: `direct_native`, 0 model calls on all 50 samples, 33/35 µs; M4/M5 gates |
+| 3 | simple repository questions commonly use zero LLM calls | MET | Leg A: `direct_native`, 0 model calls on all 50 samples, 31/40 µs; M4/M5 gates |
 | 4 | complex tasks start evidence work in parallel | MET | `full` cells measured evidence overlap 4/5/3; serial cells measured 1 |
 | 5 | model and judgment providers are replaceable | MET | Matrix driven through the `ModelProvider` trait by a fake; OpenAI-compat adapter (M6), judgment registry + fakes + feature-gated OpenJEV (M7) |
 | 6 | tasks recover after process restart | MET | G6: kill_restart, runtime_recovery, restart_approval, reentry; every supervisor sample recovered `completed` |
@@ -201,7 +217,7 @@ Numeric stop/pivot gates adopted at freeze (docs/11 #1; owner review before publ
 | 8 | workspace containment survives traversal/symlink tests | MET | G6: tools_gate traversal/symlink, mutation authorized alias/symlink refusal, runtime_repair zero-writes |
 | 9 | verification gates completion | MET | Every matrix run completed only through the acceptance contract; M9 wrong-patch gate re-run in G6 |
 | 10 | benchmarks report p50/p95 and verified success | MET | `M14_MATRIX.json` (n=10/cell, nearest-rank p50/p95, verified-success rates) + this report |
-| 11 | tachyon-full beats the in-tree serial reference | PARTIAL | Verified success equal (150/150, both rates 1.0); median TTFR faster on 2/3 tasks (3.4×, 6.1×), slower on 1/3; median completion faster on 1/3. Scripted-model caveat above — no general speed claim is made |
+| 11 | tachyon-full beats the in-tree serial reference | PARTIAL | Verified success equal (150/150, both rates 1.0); median completion: serial control fastest on all 3 fixtures (full pays journal+verify-tail overhead against a ~0.01 ms scripted model); TTFR ties at 1 ms granularity. Scripted-model caveat above — no general speed claim is made |
 
 **MVP status:** 10 of 11 exit conditions MET; the performance claim is PARTIAL and stated
 as such. Tachyon is frozen for MVP on this basis.

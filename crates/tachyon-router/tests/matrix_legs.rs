@@ -42,6 +42,14 @@ const WARMUP_A: usize = 10;
 const SAMPLES_A: usize = 50;
 const WARMUP_B: usize = 5;
 const SAMPLES_B: usize = 20;
+/// Inventory walk budget for the 15-file fixture corpus.
+const FIXTURE_SCAN_LIMIT: usize = 10_000;
+/// Evidence ranking weights: raw file excerpts outrank derived symbol rows.
+const RELEVANCE_FILE_EXCERPT_PRIMARY: f32 = 0.95;
+const RELEVANCE_FILE_EXCERPT_SECONDARY: f32 = 0.9;
+/// Symbol definition/reference rows carry the provenance signal.
+const RELEVANCE_SYMBOL_DEFINITION: f32 = 0.85;
+const RELEVANCE_SYMBOL_REFERENCE: f32 = 0.8;
 
 fn fixture_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/auth-refresh")
@@ -95,7 +103,7 @@ fn class_a_step(
 #[ignore = "M14 matrix leg: release mode, run with --ignored"]
 fn class_a_zero_llm_repo_query() {
     let fixture = fixture_root();
-    let inventory = Inventory::scan(&fixture, 10_000).expect("fixture inventory");
+    let inventory = Inventory::scan(&fixture, FIXTURE_SCAN_LIMIT).expect("fixture inventory");
     let mut index = SymbolIndex::new(&fixture, HeuristicBackend);
     index.build(&inventory);
     let corpus_files = inventory.files.len();
@@ -146,10 +154,12 @@ async fn class_b_step(router: &mut Router, index: &SymbolIndex) {
     assert!(!plan.evidence.is_empty(), "evidence must launch first");
     assert!(plan.requires_model(), "leg B plans one reasoning call");
 
-    let session = index.read_rel(SESSION_PATH).expect("session.rs readable");
+    let session = index
+        .read_projected(SESSION_PATH)
+        .expect("session.rs readable at the indexed generation");
     let reference = index
-        .read_rel(REFERENCE_PATH)
-        .expect("reference.rs readable");
+        .read_projected(REFERENCE_PATH)
+        .expect("reference.rs readable at the indexed generation");
     let provenance = index.definition_use(SYMBOL);
     assert!(!provenance.definitions.is_empty(), "{provenance:?}");
 
@@ -160,7 +170,7 @@ async fn class_b_step(router: &mut Router, index: &SymbolIndex) {
             &session,
             Provenance::repo("fs.read", SESSION_PATH),
         )
-        .with_relevance(0.95),
+        .with_relevance(RELEVANCE_FILE_EXCERPT_PRIMARY),
     );
     package.findings.push(
         EvidenceItem::new(
@@ -168,7 +178,7 @@ async fn class_b_step(router: &mut Router, index: &SymbolIndex) {
             &reference,
             Provenance::repo("fs.read", REFERENCE_PATH),
         )
-        .with_relevance(0.9),
+        .with_relevance(RELEVANCE_FILE_EXCERPT_SECONDARY),
     );
     for location in &provenance.definitions {
         package.findings.push(
@@ -177,7 +187,7 @@ async fn class_b_step(router: &mut Router, index: &SymbolIndex) {
                 &location.excerpt,
                 Provenance::repo("repo.symbol.search", &location.file),
             )
-            .with_relevance(0.85),
+            .with_relevance(RELEVANCE_SYMBOL_DEFINITION),
         );
     }
     for location in &provenance.references {
@@ -187,7 +197,7 @@ async fn class_b_step(router: &mut Router, index: &SymbolIndex) {
                 &location.excerpt,
                 Provenance::repo("repo.symbol.search", &location.file),
             )
-            .with_relevance(0.8),
+            .with_relevance(RELEVANCE_SYMBOL_REFERENCE),
         );
     }
 
@@ -236,7 +246,7 @@ async fn class_b_step(router: &mut Router, index: &SymbolIndex) {
 #[ignore = "M14 matrix leg: release mode, run with --ignored"]
 async fn class_b_evidence_first_one_call() {
     let fixture = fixture_root();
-    let inventory = Inventory::scan(&fixture, 10_000).expect("fixture inventory");
+    let inventory = Inventory::scan(&fixture, FIXTURE_SCAN_LIMIT).expect("fixture inventory");
     let mut index = SymbolIndex::new(&fixture, HeuristicBackend);
     index.build(&inventory);
     let mut router = Router::new();

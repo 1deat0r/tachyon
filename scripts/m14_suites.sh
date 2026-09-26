@@ -31,12 +31,20 @@ run cargo test -p tachyon-app --test kill_restart
 run cargo test -p tachyon-mutation --test mutation_gate --test recovery_scoped
 
 echo "== remote gateway exposure (structural) =="
-if grep -rl "TcpListener" crates/*/src >/dev/null 2>&1; then
+# No TCP listener may exist in shipped code. The pattern covers std and
+# tokio constructors; a server framework (axum/warp/actix/hyper-server)
+# would additionally show up in Cargo.lock — checked below.
+if grep -rlE "TcpListener|TcpSocket" crates/*/src >/dev/null 2>&1; then
     echo "production source binds TCP: remote exposure" >&2
     exit 1
 fi
+if grep -iE '"name" *= *"[^"]*(axum|warp|actix-web|hyper-util|socket2|tokio-tungstenite)"' Cargo.lock >/dev/null 2>&1; then
+    echo "server-capable listener crate in the dependency closure" >&2
+    exit 1
+fi
 # Positive controls: the absence above is only trusted because the same
-# pattern is demonstrably findable elsewhere in this tree.
+# pattern is demonstrably findable elsewhere in this tree (test-only
+# loopback actors) and because the gateway binds a local-only transport.
 grep -rl "TcpListener" crates/*/tests >/dev/null 2>&1 || {
     echo "positive control failed: no TcpListener found anywhere" >&2
     exit 1

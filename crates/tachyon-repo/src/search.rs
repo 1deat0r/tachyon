@@ -85,12 +85,14 @@ pub fn search(
         // warm queries perform no I/O at all. Only a projection miss pays
         // the 8 KiB text probe and the counted read.
         let path = root.join(&record.rel);
-        let projected = projection.get(&record.rel, &record.hash).or_else(|| {
-            if !is_probably_text(&path) {
-                return None;
-            }
-            projection.text(root, &record.rel, &record.hash)
-        });
+        let projected = projection
+            .get_cached(&record.rel, &record.hash)
+            .or_else(|| {
+                if !is_probably_text(&path) {
+                    return None;
+                }
+                projection.get_or_read(root, &record.rel, &record.hash)
+            });
         let Some(text) = projected else {
             continue;
         };

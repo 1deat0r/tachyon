@@ -11,17 +11,20 @@ is tracked by issues and the docs/04/§46 deferrals, see `MVP_REPORT.md`).
 
 - 2026-09-25 Milestone 14 — MVP freeze: full spec §44 benchmark matrix
   (3 fixtures × 5 modes × n=10 = 150 driver runs + Class A/B composed
-  legs) through the descriptor-driven `bench_matrix` host (generalizes
+  legs)   through the descriptor-driven `bench_matrix` host (generalizes
   the M10 `auth_refresh` example); 150/150 verified success at equal
-  full/reference rates, median TTFR (first edit) full p50 32/108/115 ms
-  vs reference 108/664/79 ms (2 of 3 faster), verification dominates
-  completion (77–91%); §42 security escape + recovery fault-injection
+  full/reference rates, median completion full p50 318/287/360 ms vs
+  serial 296/308/337 ms vs reference 155/144/148 ms (serial control
+  fastest; scripted model ≈ 0.01 ms leaves the pipeline nothing to
+  amortize), TTFR ties at 1 ms granularity (fe/edit 0–1 ms), verification dominates
+  completion (~99%); §42 security escape + recovery fault-injection
   suites run explicitly as a gate incl. a structural no-TCP-exposure
   check with positive controls; two new fixtures (`multi-file-migration`
   Class D, `architecture-plan` Class E) with broken-first/solution
   self-check gates; M13 watch item closed — content-addressed text
   projection, warm queries read 0 corpus bytes over 478 files (100
-  iterations), T5 re-measured 14.43→10.30 ms p50; docs/11 decisions
+  iterations), T5 re-measured 14.43→10.11 ms p50 (release transcript
+  `perf[T5] n=100 p50=10.109617ms p95=10.587723ms PASS`); docs/11 decisions
   recorded (#2 TUI-first/ACP post-MVP, #1 kill criteria in MVP_REPORT,
   #11 pinned scripted provider); §45 dispositions 10 MET / 1 PARTIAL
   (performance claim stated as PARTIAL). Report: `MVP_REPORT.md`,

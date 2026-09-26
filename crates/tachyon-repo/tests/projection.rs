@@ -5,6 +5,11 @@
 //! measured over 100 iterations of one `definition_use` plus one lexical
 //! search; the byte counter must not move inside the measured window.
 //!
+//! A runtime counter can only count reads routed through the projection,
+//! so the structural half of the property — no direct filesystem reads on
+//! the query path — is pinned by `query_paths_perform_no_direct_io` below,
+//! which greps the query functions' own source for `fs` tokens.
+//!
 //! Ignore-gated; the M14 ledger runs it with
 //! `cargo test -p tachyon-repo --test projection --release -- --ignored --nocapture`.
 
@@ -36,7 +41,9 @@ fn warm_queries_read_zero_corpus_bytes() {
         .get("crates/tachyon-repo/src/lib.rs")
         .expect("lib.rs is inventoried");
     assert!(
-        control.text(&root, &record.rel, &record.hash).is_some(),
+        control
+            .get_or_read(&root, &record.rel, &record.hash)
+            .is_some(),
         "positive control reads {}",
         record.rel
     );
@@ -46,7 +53,9 @@ fn warm_queries_read_zero_corpus_bytes() {
         "positive control must read bytes on a cold projection"
     );
     assert!(
-        control.text(&root, &record.rel, &record.hash).is_some(),
+        control
+            .get_or_read(&root, &record.rel, &record.hash)
+            .is_some(),
         "positive control repeat serves from cache"
     );
     assert_eq!(
@@ -77,4 +86,28 @@ fn warm_queries_read_zero_corpus_bytes() {
         "projection ok n={SAMPLES} files={} bytes_read={delta}",
         inventory.files.len()
     );
+}
+
+/// Structural guard for the projection: `references` and `search` must
+/// perform no direct filesystem reads, so every query-time corpus byte
+/// flows through the counted projection path. Runs in the default suite;
+/// it only reads two source files.
+#[test]
+fn query_paths_perform_no_direct_io() {
+    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    for (file, function) in [
+        ("index.rs", "pub fn references"),
+        ("search.rs", "pub fn search"),
+    ] {
+        let text = std::fs::read_to_string(src.join(file)).expect("own source readable");
+        let (_, body) = text.split_once(function).expect("query fn present");
+        let end = body.find("\n    pub fn ").unwrap_or(body.len());
+        let until_next = &body[..end];
+        for token in ["std::fs", "fs::", "File::"] {
+            assert!(
+                !until_next.contains(token),
+                "{file}::{function} performs direct I/O ({token}) outside the projection"
+            );
+        }
+    }
 }

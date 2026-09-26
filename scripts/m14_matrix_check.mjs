@@ -118,6 +118,8 @@ for (const fixture of FIXTURES) {
       fail(`cell ${key}: expected ${perCell} samples, found ${own.length}`);
     }
     const indices = own.map((s) => s.sample).sort((a, b) => a - b);
+    // Sample indices start at 1: the shell loop runs i=1..SAMPLES and the
+    // host echoes the index it was given (0 only for ad-hoc manual runs).
     for (let i = 0; i < perCell; i += 1) {
       if (indices[i] !== i + 1) fail(`cell ${key}: sample indices ${JSON.stringify(indices)}`);
     }

@@ -77,9 +77,11 @@ impl SymbolIndex {
     }
 
     /// (Re)builds the index over `inventory`, extracting symbols from text
-    /// files with a known language.
+    /// files with a known language. Clears the text projection first so no
+    /// prior-corpus text survives into the new generation.
     pub fn build(&mut self, inventory: &Inventory) {
         self.files.clear();
+        self.projection.clear();
         for record in &inventory.files {
             self.index_record(record);
         }
@@ -87,14 +89,14 @@ impl SymbolIndex {
     }
 
     /// Re-indexes `rels` (watcher invalidation path). Unknown rels are
-    /// dropped from the index.
+    /// dropped from the index and from the projection together.
     pub fn refresh(&mut self, inventory: &Inventory, rels: &[&str]) {
         for rel in rels {
-            match inventory.get(rel) {
-                Some(record) => self.index_record(record),
-                None => {
-                    self.files.remove(*rel);
-                }
+            if let Some(record) = inventory.get(rel) {
+                self.index_record(record);
+            } else {
+                self.files.remove(*rel);
+                self.projection.remove(rel);
             }
         }
         self.generation += 1;
@@ -186,7 +188,7 @@ impl SymbolIndex {
             let Some(indexed) = self.files.get(rel.as_str()) else {
                 continue;
             };
-            let Some(text) = self.projection.text(&self.root, rel, &indexed.hash) else {
+            let Some(text) = self.projection.get_or_read(&self.root, rel, &indexed.hash) else {
                 continue;
             };
             for (index, line) in text.lines().enumerate() {
@@ -222,8 +224,9 @@ impl SymbolIndex {
     }
 
     /// Re-hashes every indexed file: returns rels whose content drifted
-    /// from the indexed hash (stale index entries), and drops deleted files.
-    /// Hashes are authoritative; the index is repaired by `refresh`.
+    /// from the indexed hash (stale index entries), and drops deleted files
+    /// from the index and the projection together. Hashes are authoritative;
+    /// the index is repaired by `refresh`.
     pub fn verify(&mut self, inventory: &Inventory) -> Vec<String> {
         let mut stale = Vec::new();
         let indexed: Vec<String> = self.files.keys().cloned().collect();
@@ -231,11 +234,14 @@ impl SymbolIndex {
             match inventory.get(&rel) {
                 None => {
                     self.files.remove(&rel);
+                    self.projection.remove(&rel);
                     stale.push(rel);
                 }
                 Some(record) => {
                     let hash = &self.files.get(&rel).map(|file| file.hash.clone());
                     if hash.as_ref() != Some(&record.hash) {
+                        self.files.remove(&rel);
+                        self.projection.remove(&rel);
                         stale.push(rel);
                     }
                 }
@@ -245,10 +251,23 @@ impl SymbolIndex {
         stale
     }
 
-    /// Reads a file relative to the index root.
+    /// Reads a file relative to the index root, straight from disk.
+    /// Unlike [`SymbolIndex::read_projected`]/[`SymbolIndex::references`]
+    /// this is intentionally live: use it for explicit evidence reads,
+    /// never as a query path.
     #[must_use]
     pub fn read_rel(&self, rel: &str) -> Option<String> {
         std::fs::read_to_string(self.root.join(rel)).ok()
+    }
+
+    /// Reads a file from the indexed generation via the projection
+    /// (memory when the indexed hash still matches, one counted disk
+    /// read otherwise). Query and evidence paths that must see the same
+    /// generation as the symbols use this instead of [`SymbolIndex::read_rel`].
+    #[must_use]
+    pub fn read_projected(&self, rel: &str) -> Option<std::sync::Arc<str>> {
+        let indexed = self.files.get(rel)?;
+        self.projection.get_or_read(&self.root, rel, &indexed.hash)
     }
 
     /// True when `path` is inside the index root (for watch filtering).

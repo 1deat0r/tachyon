@@ -73,9 +73,16 @@ if (claimLine && claimLine.includes("| MET") && matrix.comparisons) {
 }
 
 // ---- numbers must trace to the matrix artifact ---------------------------
+// Scoping (M13 F4): cell figures must appear inside the median/p95
+// section, not anywhere in the file. Leg figures live one section down
+// (Critical-path breakdown), so the scope covers both sections.
+const medianSection = report.split("## Median and p95 TTFR and completion")[1];
+if (!medianSection) fail("median/p95 section unreadable");
+const medianBody = medianSection.split("## Model, Jev and tool calls")[0];
+
 function requireFigure(label, needle) {
-  if (!report.includes(String(needle))) {
-    fail(`figure not found for ${label}: ${needle}`);
+  if (!medianBody.includes(String(needle))) {
+    fail(`figure not in the median/p95 section for ${label}: ${needle}`);
   }
 }
 
@@ -83,9 +90,9 @@ const totalCellSamples =
   matrix.samples_per_cell * matrix.cells.length;
 let verified = 0;
 for (const cell of matrix.cells) verified += cell.verified_success_rate * cell.n;
-if (verified === totalCellSamples) {
-  requireFigure("cell verified-success total", `${totalCellSamples}/${totalCellSamples}`);
-}
+// The verified-success total is required unconditionally: on an imperfect
+// run the report must state the actual N/M, never silently skip it.
+requireFigure("cell verified-success total", `${verified}/${totalCellSamples}`);
 
 for (const cell of matrix.cells.filter((c) => c.mode === "full")) {
   const m = cell.metrics;
@@ -101,6 +108,7 @@ for (const cell of matrix.cells.filter((c) => c.mode === "full")) {
 for (const leg of matrix.legs) {
   requireFigure(`leg ${leg.leg} p50/p95`, `${leg.p50_us}/${leg.p95_us}`);
 }
+// Verified-success table: the leg totals use the same wording.
 requireFigure(
   "serial-reference comparison sample count",
   `n=${matrix.samples_per_cell}`

@@ -68,11 +68,11 @@ struct Descriptor {
 }
 
 /// Provider decorator that times every invoke so the report carries real
-/// model-call durations instead of an assumption.
+/// model-call durations instead of an assumption. Call counts come from
+/// the inner fake (`request_count`); this wrapper only accumulates time.
 struct TimedProvider {
     inner: Arc<FakeModelProvider>,
     total: Mutex<Duration>,
-    calls: Mutex<u32>,
 }
 
 impl TimedProvider {
@@ -80,20 +80,14 @@ impl TimedProvider {
         Self {
             inner,
             total: Mutex::new(Duration::ZERO),
-            calls: Mutex::new(0),
         }
     }
 
-    fn stats(&self) -> (Duration, u32) {
-        let total = *self
+    fn stats(&self) -> Duration {
+        *self
             .total
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let calls = *self
-            .calls
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        (total, calls)
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -122,10 +116,6 @@ impl ModelProvider for TimedProvider {
             .total
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) += started.elapsed();
-        *self
-            .calls
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) += 1;
         result
     }
 }
@@ -135,6 +125,7 @@ fn fixtures_root() -> PathBuf {
 }
 
 fn load_descriptor(id: &str) -> Result<Descriptor, String> {
+    check_in_bounds(&PathBuf::from("fixtures"), id)?;
     let path = fixtures_root().join(id).join("bench.json");
     let raw = std::fs::read_to_string(&path)
         .map_err(|error| format!("descriptor {}: {error}", path.display()))?;
@@ -160,6 +151,24 @@ fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
             std::fs::copy(entry.path(), to)?;
         }
     }
+    Ok(())
+}
+
+/// A fixture or descriptor path is trusted only when it stays inside its
+/// root: this refuses absolute paths and `..` escapes before any fs op.
+/// (Bench descriptors are checked-in reviewed files and the operator runs
+/// the host locally, but self-attack by typo'd paths is still a bug.)
+fn check_in_bounds(root: &Path, rel: &str) -> Result<(), String> {
+    let rel_path = Path::new(rel);
+    if rel.is_empty()
+        || rel_path.is_absolute()
+        || rel_path
+            .components()
+            .any(|component| component == std::path::Component::ParentDir)
+    {
+        return Err(format!("path escapes its root: {rel}"));
+    }
+    let _ = root;
     Ok(())
 }
 
@@ -201,7 +210,17 @@ fn observed_changes(fixture: &Path, ws: &Path) -> Vec<String> {
     changed
 }
 
-async fn cargo_test(ws: &Path, target_dir: &Path) -> bool {
+/// Outcome of one `cargo test` invocation: pass, test-failure, or a spawn
+/// failure. Spawn failures (missing toolchain, unstartable child) must
+/// never masquerade as a broken fixture.
+#[derive(Debug, PartialEq, Eq)]
+enum CargoOutcome {
+    Passed,
+    TestsFailed,
+    CouldNotStart(String),
+}
+
+async fn cargo_test(ws: &Path, target_dir: &Path) -> CargoOutcome {
     let out = tokio::process::Command::new("cargo")
         .args(["test", "--offline", "--locked"])
         .current_dir(ws)
@@ -210,10 +229,11 @@ async fn cargo_test(ws: &Path, target_dir: &Path) -> bool {
         .output()
         .await;
     match out {
-        Ok(o) => o.status.success(),
+        Ok(o) if o.status.success() => CargoOutcome::Passed,
+        Ok(_) => CargoOutcome::TestsFailed,
         Err(error) => {
             eprintln!("cargo test could not start: {error}");
-            false
+            CargoOutcome::CouldNotStart(error.to_string())
         }
     }
 }
@@ -231,15 +251,24 @@ async fn fixture_check(descriptor: &Descriptor) -> Result<String, String> {
     copy_dir(&fixture, &ws).map_err(|error| format!("fixture copy: {error}"))?;
     let before = snapshot_paths(&ws, &descriptor.protected_paths);
 
-    let broken_failed = !cargo_test(&ws, &scratch.join("target")).await;
-    if !broken_failed {
-        return Err(format!(
-            "{}: checked-in fixture unexpectedly passes; broken-first is vacuous",
-            descriptor.id
-        ));
+    match cargo_test(&ws, &scratch.join("target")).await {
+        CargoOutcome::TestsFailed => {}
+        CargoOutcome::Passed => {
+            return Err(format!(
+                "{}: checked-in fixture unexpectedly passes; broken-first is vacuous",
+                descriptor.id
+            ));
+        }
+        CargoOutcome::CouldNotStart(error) => {
+            return Err(format!(
+                "{0}: broken-first cargo could not start: {error}",
+                descriptor.id
+            ));
+        }
     }
 
     for rel in &descriptor.change_paths {
+        check_in_bounds(&ws, rel)?;
         let solution = fixtures_root()
             .join("solutions")
             .join(&descriptor.id)
@@ -257,12 +286,20 @@ async fn fixture_check(descriptor: &Descriptor) -> Result<String, String> {
         std::fs::write(ws.join(rel), fixed).map_err(|error| format!("apply: {error}"))?;
     }
 
-    let fixed_passes = cargo_test(&ws, &scratch.join("target")).await;
-    if !fixed_passes {
-        return Err(format!(
-            "{}: fixture does not pass after applying its shipped solution",
-            descriptor.id
-        ));
+    match cargo_test(&ws, &scratch.join("target")).await {
+        CargoOutcome::Passed => {}
+        CargoOutcome::TestsFailed => {
+            return Err(format!(
+                "{}: fixture does not pass after applying its shipped solution",
+                descriptor.id
+            ));
+        }
+        CargoOutcome::CouldNotStart(error) => {
+            return Err(format!(
+                "{0}: post-fix cargo could not start: {error}",
+                descriptor.id
+            ));
+        }
     }
 
     let after = snapshot_paths(&ws, &descriptor.protected_paths);
@@ -283,15 +320,20 @@ async fn fixture_check(descriptor: &Descriptor) -> Result<String, String> {
     Ok(format!("fixture self-check ok: {}", descriptor.id))
 }
 
-async fn run_sample(
-    descriptor: &Descriptor,
-    mode: &str,
-    sample: Option<u64>,
-) -> Result<serde_json::Value, String> {
-    let harness_start = Instant::now();
+/// Fresh scratch workspace plus the broken-first proof and a snapshot of
+/// every protected path. Returned paths live under one fresh `scratch`
+/// dir so the caller can drain it after the run.
+struct PreparedScratch {
+    scratch: PathBuf,
+    ws: PathBuf,
+    target: PathBuf,
+    before: BTreeMap<String, Vec<u8>>,
+}
+
+fn prepare_scratch(descriptor: &Descriptor) -> Result<PreparedScratch, String> {
     let fixture = fixtures_root().join(&descriptor.id);
     let scratch = std::env::temp_dir().join(format!(
-        "tachyon-m14-{}-{mode}-{}",
+        "tachyon-m14-{}-{}",
         descriptor.id,
         uuid::Uuid::now_v7()
     ));
@@ -299,28 +341,23 @@ async fn run_sample(
     copy_dir(&fixture, &ws).map_err(|error| format!("fixture copy: {error}"))?;
     let before = snapshot_paths(&ws, &descriptor.protected_paths);
     let target = scratch.join("target");
-    eprintln!(
-        "run {}/{} sample {:?} scratch {}",
-        descriptor.id,
-        mode,
-        sample,
-        ws.display()
-    );
+    Ok(PreparedScratch {
+        scratch,
+        ws,
+        target,
+        before,
+    })
+}
 
-    // Broken regression must fail first (fixture state, not setup).
-    if cargo_test(&ws, &target).await {
-        return Err(format!(
-            "{}: broken-first cargo test did not fail",
-            descriptor.id
-        ));
-    }
-
-    // Scripted proposal: one operation per change_path, full-file content
-    // from the shipped solution, bound to the broken bytes' hash.
+/// Scripted proposal: one `mutation.patch` operation per `change_path` with
+/// full-file solution content bound to the broken bytes' hash.
+fn build_script(descriptor: &Descriptor, ws: &Path) -> Result<serde_json::Value, String> {
     let mut operations = Vec::new();
     for rel in &descriptor.change_paths {
+        check_in_bounds(ws, rel)?;
         let current =
             std::fs::read(ws.join(rel)).map_err(|error| format!("target read {rel}: {error}"))?;
+        check_in_bounds(&fixtures_root().join("solutions").join(&descriptor.id), rel)?;
         let solution = fixtures_root()
             .join("solutions")
             .join(&descriptor.id)
@@ -339,10 +376,51 @@ async fn run_sample(
             }
         }));
     }
-    let script = serde_json::json!({
+    Ok(serde_json::json!({
         "decision": "propose_execution",
         "operations": operations,
-    });
+    }))
+}
+
+async fn run_sample(
+    descriptor: &Descriptor,
+    mode: &str,
+    sample: Option<u64>,
+) -> Result<serde_json::Value, String> {
+    let harness_start = Instant::now();
+    let fixture = fixtures_root().join(&descriptor.id);
+    let prepared = prepare_scratch(descriptor)?;
+    let scratch = prepared.scratch;
+    let ws = prepared.ws;
+    let target = prepared.target;
+    let before = prepared.before;
+    eprintln!(
+        "run {}/{} sample {:?} scratch {}",
+        descriptor.id,
+        mode,
+        sample,
+        ws.display()
+    );
+
+    // Broken regression must fail first (fixture state, not setup): a
+    // spawn failure is an error, never a pass.
+    match cargo_test(&ws, &target).await {
+        CargoOutcome::TestsFailed => {}
+        CargoOutcome::Passed => {
+            return Err(format!(
+                "{}: broken-first cargo test did not fail",
+                descriptor.id
+            ));
+        }
+        CargoOutcome::CouldNotStart(error) => {
+            return Err(format!(
+                "{0}: broken-first cargo could not start: {error}",
+                descriptor.id
+            ));
+        }
+    }
+
+    let script = build_script(descriptor, &ws)?;
     let fake = Arc::new(FakeModelProvider::new(ProviderId(format!(
         "bench-script-{}",
         descriptor.id
@@ -414,7 +492,11 @@ async fn run_sample(
 
     // Reference is the serial control group (M10 semantics); the two
     // alias modes measure the full path because no speculation or
-    // judgment stage exists to disable.
+    // judgment stage exists to disable. WARNING to future stages: the
+    // judgment_calls/speculation_* report fields below are measured as
+    // zero because there is no such stage to call — adding a speculation
+    // or judgment stage MUST update these modes and fields, which will
+    // not catch the change on their own.
     let evidence_mode = if matches!(mode, "full" | "no-speculation" | "no-judgment") {
         EvidenceMode::Concurrent
     } else {
@@ -437,20 +519,28 @@ async fn run_sample(
         cancel: tokio_util::sync::CancellationToken::new(),
     };
     let drive_start = Instant::now();
-    let outcome = drive(host, context, provider.clone(), plan)
-        .await
-        .map_err(|error| format!("drive: {error}"))?;
-    let drive_ms = ms(drive_start.elapsed());
+    let drive_result = drive(host, context, provider.clone(), plan).await;
+    // Always close the store, including on drive failure, before
+    // propagating the error: a leaked open writer is a lifecycle break.
     if let Some(store) = store_holder {
         store.close().await;
     }
+    let outcome = drive_result.map_err(|error| format!("drive: {error}"))?;
+    let drive_ms = as_millis_u64(drive_start.elapsed());
 
     // Reference keeps its declared control-loop verification tail.
+    // A spawn failure is an error here too, never a pass.
     let (label, task_id, revision, recovery, final_verification_ms, verify_subprocesses) =
         if mode == "reference" {
             let tail_start = Instant::now();
-            let passed = cargo_test(&ws, &target).await;
-            let tail_ms = ms(tail_start.elapsed());
+            let passed = match cargo_test(&ws, &target).await {
+                CargoOutcome::Passed => true,
+                CargoOutcome::TestsFailed => false,
+                CargoOutcome::CouldNotStart(error) => {
+                    return Err(format!("reference tail cargo could not start: {error}"));
+                }
+            };
+            let tail_ms = as_millis_u64(tail_start.elapsed());
             (
                 if passed {
                     "completed_reference"
@@ -461,7 +551,7 @@ async fn run_sample(
                 None,
                 None,
                 None,
-                Some(ms(origin.elapsed())),
+                Some(as_millis_u64(origin.elapsed())),
                 Some(tail_ms),
             )
         } else {
@@ -480,7 +570,7 @@ async fn run_sample(
 
     let after = snapshot_paths(&ws, &descriptor.protected_paths);
     let observed = observed_changes(&fixture, &ws);
-    let (model_ms, _wrapper_calls) = provider.stats();
+    let model_ms = provider.stats();
     let model_calls = fake.request_count() as u64;
     let usage_provenance = match outcome.usage.provenance {
         UsageProvenance::ProviderReported => "provider_reported",
@@ -507,7 +597,7 @@ async fn run_sample(
         _ => (None, ""),
     };
 
-    Ok(serde_json::json!({
+    let report = serde_json::json!({
         "fixture": descriptor.id,
         "class": descriptor.class,
         "mode": mode,
@@ -522,13 +612,13 @@ async fn run_sample(
         "broken_first_failed": true,
         "completion_ms": completion_ms,
         "task_wall_ms": drive_ms,
-        "harness_ms": ms(harness_start.elapsed()),
+        "harness_ms": as_millis_u64(harness_start.elapsed()),
         "first_evidence_ms": outcome.first_evidence_ms,
         "first_edit_ms": outcome.first_edit_ms,
         "final_verification_ms": final_verification_ms,
         "verify_host_tail_ms": verify_subprocesses,
         "model_calls": model_calls,
-        "model_ms": ms_f64(model_ms),
+        "model_ms": as_millis_f64(model_ms),
         "judgment_calls": 0u64,
         "jev_calls": 0u64,
         "judgment_note": "no judgment stage exists in the MVP driver; judgment would surface as a provider call here",
@@ -561,14 +651,23 @@ async fn run_sample(
         "revision": revision,
         "recovery": recovery,
         "corpus": fixture.display().to_string(),
-    }))
+    });
+
+    // Drain this sample's scratch (fixture copies plus fixture-local cargo
+    // artifacts) so the 150-sample matrix cannot exhaust the disk; keep it
+    // on failure for debugging.
+    if verified {
+        let _ignored = std::fs::remove_dir_all(&scratch);
+    }
+
+    Ok(report)
 }
 
-fn ms(duration: Duration) -> u64 {
+fn as_millis_u64(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
-fn ms_f64(duration: Duration) -> f64 {
+fn as_millis_f64(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1000.0
 }
 

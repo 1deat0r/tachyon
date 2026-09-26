@@ -10,7 +10,7 @@
   exposure check; new Class D (`multi-file-migration`) and Class E
   (`architecture-plan`) fixtures with broken-first self-check gates;
   content-addressed text projection closes the M13 corpus-re-read watch
-  item (warm queries read 0 bytes; T5 14.43 → 10.30 ms p50). §45
+  item (warm queries read 0 bytes; T5 14.43 → 10.11 ms p50). §45
   dispositions 10 MET / 1 PARTIAL; kill criteria, docs/11 decisions
   (#2 TUI-first, #11 pinned scripted provider) and deferred work recorded
   in `MVP_REPORT.md`; aggregate artifact `docs/milestones/M14_MATRIX.json`.
